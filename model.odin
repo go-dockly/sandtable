@@ -29,6 +29,7 @@ Model_Asset :: struct {
 	pivot:  [3]f32,  // bottom centre of the bounds, model space
 	size:   [3]f32,  // bounds size, model space
 	colors: [][4]u8, // albedo samples, for palette extraction
+	missing: bool,   // a level's model that did not load: path only, no mesh
 }
 
 Model_Shader :: struct {

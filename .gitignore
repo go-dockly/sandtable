@@ -3,3 +3,5 @@ sandtable.exe
 *.bin
 *.pdb
 models/
+*.autosave.json
+*.json.tmp

@@ -37,8 +37,17 @@ odin run . -o:speed -- ../ospz/models/krakow.spz --world-scale 0.005 --model ass
 | `--max-tilt deg` | steepest alignment, default 20 |
 | `--cell m` | terrain cell size in metres; default 0.5 m, coarsened automatically for sparse clouds |
 | `--terrain-export prefix` | write the heightmaps after each terrain build (see *Terrain* below) |
+| `--level file.json` | the level to save to (`ctrl+S`); opened if it exists. Default: `levels/<capture>.json` |
 
-`F` prints the selected object as these flags (`shift+F`: every object), so a placement found by eye can be reproduced. The flags set up the first object; the rest are placed with the mouse (saving a level is Block 3).
+Reopen a level, with its capture, models, objects, world scale and view:
+
+```
+odin run . -o:speed -- levels/krakow.json
+```
+
+A capture given as well wins over the level's; `--model` then is what `A` places in an empty level.
+
+`F` prints the selected object as these flags (`shift+F`: every object), so a placement found by eye can be reproduced. The flags set up the first object; the rest are placed with the mouse and kept in the level file (see *Levels* below).
 
 The HUD shows the object's size in metres, positions with enough decimals for ~1 cm at the current world scale, and in the game camera how many art pixels the object spans, to judge sprite readability.
 
@@ -92,6 +101,14 @@ For every object:
 
 The selection is outlined yellow, the preview (or the object being moved) cyan, the object under the cursor white.
 
+Level:
+
+| Key | Does |
+|-----|------|
+| `ctrl` (`cmd`) + `S` | save the level |
+| `ctrl` (`cmd`) + `R` | reload it from disk, dropping unsaved changes (asks with a second press) |
+| drop a `.json` | open that level |
+
 Terrain:
 
 | Key | Does |
@@ -113,9 +130,57 @@ Game camera: 38° Commandos tilt stays fixed. Left-drag or a sideways two-finger
 | `main.odin` | pass sequencing from `pixlsplat/src/main.odin` |
 | `model.odin` | GLB objects as raylib meshes in the splat pass; pivot, palette & lighting lessons from pixlsplat's models |
 | `placement.odin` | objects in the level: loaded models, keyboard & mouse input, command line, drawing, editor overlay (Blocks 1, 2, 5) |
+| `scene/` | Block 3 without raylib: the level file, JSON read & write, asset references, paths relative to the level, id checks. `odin test scene` |
+| `level.odin` | Block 3 glue: open, save, reload, autosave, missing models, level HUD |
 | `editor/` | Block 2 without raylib: instances with stable ids, the select / place / move state machine, cursor rays, object picking, click-or-drag, terrain snap (Block 5). `odin test editor` |
 | `terrain/terrain.odin` | Block 5 terrain proxy: heightmaps from the cloud, height / normal / footprint sampling, ray picking, export. No raylib: `odin test terrain` |
 | `terrain_view.odin` | builds the terrain at load, grey-box mesh, terrain HUD |
+
+## Levels
+
+A level is a small JSON file next to the project (default `levels/<capture>.json`) that references the capture and the models and lists the objects. It never copies or changes the capture or the GLBs, so it diffs well in git. Paths in it are relative to the level file, with forward slashes. One object per line:
+
+```json
+{
+  "format": "sandtable-level",
+  "version": 1,
+  "id": "krakow",
+  "title": "krakow",
+  "terrain": "../models/terrain/krakow.spz",
+  "worldScale": 0.005,
+  "terrainCell": 0,
+  "maxTilt": 20,
+  "nextId": 4,
+  "view": { "target": [0.1, 0.02, -0.3], "azimuth": 45, "viewHeight": 0.8 },
+  "assets": [
+    { "id": "volkswagen_82", "path": "../models/car/volkswagen_82.glb" }
+  ],
+  "objects": [
+    { "id": 1, "asset": "volkswagen_82", "position": [0.1, 0.0123, 0.2], "rotation": [0, 1.5707964, 0], "scale": [1, 1, 1], "up": [0.05, 0.99875, 0], "snap": "ground", "offset": 0, "align": true, "ground": 0.0123 }
+  ]
+}
+```
+
+| Field | Holds |
+|-------|-------|
+| `terrain` | the capture |
+| `worldScale`, `terrainCell` | world units per metre; terrain cell in metres (0 automatic): the terrain is rebuilt as the level was made |
+| `nextId` | the next object id. Ids are never reused, also across sessions |
+| `view` | the game camera, so a level reopens where you left it |
+| `assets` | the models, by id; objects refer to these ids, so one path change re-points every object of that model |
+| `position` | the pivot (bottom centre), world units |
+| `rotation` | Euler XYZ, radians |
+| `scale` | 1 = the GLB's real size |
+| `up` | the object's tilted +Y, so a reader without the terrain gets the same pose |
+| `snap`, `offset`, `align`, `ground` | how the editor stands it on the terrain (see *Terrain*) |
+
+Safe by default:
+- A level that exists but was not opened is only overwritten on a second `ctrl+S`.
+- Unsaved changes are only dropped on a second `ctrl+R`.
+- Closing the window with unsaved changes writes `<level>.autosave.json` next to the level.
+- Saving goes through a temporary file, so a crash leaves the old level whole.
+- A model that does not load stays in the level (its objects are kept, just not drawn), and dropping that model later brings them back.
+- Duplicate or missing ids get fresh ones, and unknown fields are ignored, with a warning for each fix.
 
 ## Terrain
 
@@ -148,6 +213,7 @@ Tests: a synthetic street with a slope, a building with no ground under it, a tr
 ```
 odin test terrain
 odin test editor
+odin test scene
 ```
 
 
@@ -582,6 +648,8 @@ Goal: the Volkswagen exists in Krakow
 - Stable object IDs.
 
 **Deliverable:** reopen yesterday's mission & continue editing.
+
+**Status:** implemented. `ctrl+S` writes `levels/<capture>.json` (or `--level`); `odin run . -- levels/krakow.json` reopens it with its capture, models, objects, ids, world scale and camera. Objects refer to models through an asset table, by id; paths are relative to the level file. Ids are stable across sessions (`nextId`). Overwrites and discards ask twice, closing with unsaved changes autosaves next to the level, missing models are kept. The format is in `scene/` without raylib and is unit tested. See *Levels* above and `docs/scene.md`.
 
 ## **Block 4 — Asset browser + inspector**
 
