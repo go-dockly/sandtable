@@ -112,21 +112,23 @@ release_model_asset :: proc(a: ^Model_Asset) {
 	a^ = {}
 }
 
-// Model space -> world: rotate & scale about the pivot, then move the pivot to
-// `t.position`. Euler XYZ in radians; only yaw is driven for now.
-model_matrix :: proc(a: Model_Asset, t: Transform) -> rl.Matrix {
+// Model space (metres) -> world: scale by object scale x world units per metre,
+// rotate about the pivot, then move the pivot to `t.position`. Euler XYZ in
+// radians; only yaw is driven for now.
+model_matrix :: proc(a: Model_Asset, t: Transform, world_scale: f32) -> rl.Matrix {
+	s := t.scale * world_scale
 	return rl.MatrixTranslate(t.position.x, t.position.y, t.position.z) *
 		rl.MatrixRotateXYZ(t.rotation) *
-		rl.MatrixScale(t.scale.x, t.scale.y, t.scale.z) *
+		rl.MatrixScale(s.x, s.y, s.z) *
 		rl.MatrixTranslate(-a.pivot.x, -a.pivot.y, -a.pivot.z)
 }
 
 // Call between BeginMode3D / EndMode3D, after the projection has been set to
 // the splat pass's (see main.odin), and before splat_draw: the model writes
 // depth, the splats test against it.
-model_draw :: proc(a: Model_Asset, t: Transform) {
+model_draw :: proc(a: Model_Asset, t: Transform, world_scale: f32) {
 	if a.model.meshCount <= 0 do return
-	world := model_matrix(a, t)
+	world := model_matrix(a, t, world_scale)
 	rlgl.EnableDepthTest()
 	rlgl.EnableDepthMask()
 	for i in 0 ..< a.model.meshCount {

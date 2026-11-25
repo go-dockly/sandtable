@@ -8,7 +8,9 @@ package main
 //   I J K L        move along the ground, relative to the view (shift: faster)
 //   Y H            raise / lower the ground plane (the object stays on it)
 //   , .            rotate 15 degrees left / right (shift: 90)
-//   N M            scale down / up (shift: faster)
+//   N M            object scale down / up (shift: faster)
+//   ctrl+N M       world scale down / up: calibrate the capture against a
+//                  known-size object (a car is ~4 m), then keep the value
 //   T              back to the start transform
 //   B              overlay: ground grid, bounds, pivot, +Z forward
 //   V              hide / show the object
@@ -26,35 +28,42 @@ import rl "vendor:raylib"
 Transform :: struct {
 	position: [3]f32, // world position of the pivot (bottom centre of the bounds)
 	rotation: [3]f32, // Euler XYZ, radians. Upright objects only use .y
-	scale:    [3]f32,
+	scale:    [3]f32, // object scale: 1 = the GLB's own size, in metres
 }
 
+// Splat captures are not in metres (Krakow: ~0.005 units per metre), GLBs are.
+// world_scale bridges the two, so objects keep scale 1 at real size and sizes
+// can be shown in metres.
 Placement :: struct {
-	transform: Transform,
-	ground:    f32, // height of the placement plane; transform.position.y follows it
-	overlay:   bool,
-	visible:   bool,
+	transform:   Transform,
+	ground:      f32, // height of the placement plane; transform.position.y follows it
+	world_scale: f32, // world units per metre
+	overlay:     bool,
+	visible:     bool,
 }
 
 // Command line. The cloud is the first argument that is not a flag.
 //
 //   odin run . -- ../ospz/models/krakow.spz --model assets/models/car/volkswagen_typ-82.glb
-//                 [--pos x,y,z] [--yaw degrees] [--scale s] [--ground y]
+//                 [--world-scale u] [--pos x,y,z] [--yaw degrees] [--scale s] [--ground y]
 //
-// --pos sets the ground plane to its y. --ground alone keeps x/z at the cloud centre.
+// --world-scale is world units per metre (default 1). --pos sets the ground
+// plane to its y. --ground alone keeps x/z at the cloud centre.
 Options :: struct {
-	cloud:      string,
-	model:      string,
-	pos:        [3]f32,
-	yaw:        f32, // degrees
-	scale:      f32,
-	ground:     f32,
-	has_pos:    bool,
-	has_ground: bool,
+	cloud:       string,
+	model:       string,
+	pos:         [3]f32,
+	yaw:         f32, // degrees
+	scale:       f32,
+	world_scale: f32,
+	ground:      f32,
+	has_pos:     bool,
+	has_ground:  bool,
 }
 
 parse_options :: proc(args: []string) -> (o: Options, ok: bool) {
 	o.scale = 1
+	o.world_scale = 1
 	ok = true
 	i := 0
 	for i < len(args) {
@@ -94,6 +103,14 @@ parse_options :: proc(args: []string) -> (o: Options, ok: bool) {
 				ok = false
 			} else {
 				o.scale = v
+			}
+		case "--world-scale":
+			v, vok := strconv.parse_f32(value)
+			if !vok || v <= 0 {
+				fmt.eprintf("--world-scale %q: expected world units per metre, > 0\n", value)
+				ok = false
+			} else {
+				o.world_scale = v
 			}
 		case "--yaw":
 			v, vok := strconv.parse_f32(value)
@@ -164,6 +181,7 @@ placement_reset :: proc(p: ^Placement, o: Options, v: Splat_View) {
 		ground = o.pos.y
 	}
 	p.ground = ground
+	p.world_scale = o.world_scale
 	p.transform = Transform{
 		position = position,
 		rotation = {0, o.yaw * math.RAD_PER_DEG, 0},
@@ -204,10 +222,18 @@ placement_update :: proc(p: ^Placement, camera: rl.Camera3D, extent: f32, dt: f3
 	if rl.IsKeyPressed(.PERIOD) do p.transform.rotation.y -= step
 	p.transform.rotation.y = math.mod(p.transform.rotation.y, 2 * math.PI)
 
-	// exponential, so a held key feels the same at any size: x2 per second
+	// exponential, so a held key feels the same at any size: x2 per second.
+	// ctrl: the world scale instead, for calibrating a capture
 	rate := f32(math.LN2) * dt * (f32(4) if shift else f32(1))
-	if rl.IsKeyDown(.M) do p.transform.scale *= math.exp(rate)
-	if rl.IsKeyDown(.N) do p.transform.scale *= math.exp(-rate)
+	ctrl := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
+	factor: f32 = 1
+	if rl.IsKeyDown(.M) do factor = math.exp(rate)
+	if rl.IsKeyDown(.N) do factor = math.exp(-rate)
+	if ctrl {
+		p.world_scale *= factor
+	} else {
+		p.transform.scale *= factor
+	}
 
 	if rl.IsKeyPressed(.B) do p.overlay = !p.overlay
 	if rl.IsKeyPressed(.V) do p.visible = !p.visible
@@ -218,11 +244,42 @@ placement_flags :: proc(p: Placement, allocator := context.allocator) -> string 
 	t := p.transform
 	yaw := t.rotation.y * math.DEG_PER_RAD
 	if yaw < 0 do yaw += 360
+	f := world_fmt(p.world_scale)
 	return fmt.aprintf(
-		"--pos %.3f,%.3f,%.3f --yaw %.1f --scale %.4f",
-		t.position.x, t.position.y, t.position.z, yaw, t.scale.x,
+		"--world-scale %.6f --pos %s,%s,%s --yaw %.1f --scale %.3f",
+		p.world_scale,
+		fmt.tprintf(f, t.position.x), fmt.tprintf(f, t.position.y), fmt.tprintf(f, t.position.z),
+		yaw, t.scale.x,
 		allocator = allocator,
 	)
+}
+
+// Format for world-unit values that resolves about a centimetre: Krakow at
+// ~0.005 units/m needs 5 decimals where a metric capture needs 2.
+world_fmt :: proc(world_scale: f32) -> string {
+	d := int(math.ceil(math.log10(100 / max(world_scale, 1e-9))))
+	switch {
+	case d <= 2: return "%.2f"
+	case d == 3: return "%.3f"
+	case d == 4: return "%.4f"
+	case d == 5: return "%.5f"
+	case d == 6: return "%.6f"
+	}
+	return "%.7f"
+}
+
+// Object size in metres: the GLB's bounds times the object scale.
+object_size_m :: proc(a: Model_Asset, t: Transform) -> [3]f32 {
+	return a.size * t.scale
+}
+
+// Grid cell in metres, a power of ten giving 2..10 cells either side of the
+// object. 1 m for anything car-sized.
+grid_cell_m :: proc(half_m: f32) -> f32 {
+	cell: f32 = 1
+	for half_m / cell > 10 do cell *= 10
+	for half_m / cell < 2 && cell > 0.01 do cell /= 10
+	return cell
 }
 
 // ---------------------------------------------------------------------------
@@ -255,20 +312,25 @@ draw_placement_overlay :: proc(a: Model_Asset, p: Placement, view_m, proj_m: rl.
 	t := p.transform
 	g := p.ground
 
-	// ground grid around the object, 8 x 8 cells
-	foot := max(a.size.x * t.scale.x, a.size.z * t.scale.z)
-	if foot <= 0 do foot = 1
-	half := foot * 2
-	cell := half / 4
+	// ground grid around the object in whole metres (grid_cell_m), so the
+	// world scale can be checked against the object at a glance
+	size_m := object_size_m(a, t)
+	foot_m := max(size_m.x, size_m.z)
+	if foot_m <= 0 do foot_m = 1
+	cell_m := grid_cell_m(foot_m * 2)
+	n := int(math.ceil(foot_m * 2 / cell_m))
+	cell := cell_m * p.world_scale
+	half := f32(n) * cell
 	c := t.position
-	for k in -4 ..= 4 {
+	for k in -n ..= n {
 		o := f32(k) * cell
 		overlay_line(vp, w, h, {c.x - half, g, c.z + o}, {c.x + half, g, c.z + o}, OVERLAY_GRID)
 		overlay_line(vp, w, h, {c.x + o, g, c.z - half}, {c.x + o, g, c.z + half}, OVERLAY_GRID)
 	}
 
 	if a.model.meshCount <= 0 do return
-	world := model_matrix(a, t)
+	foot := foot_m * p.world_scale
+	world := model_matrix(a, t, p.world_scale)
 	to_world :: proc(m: rl.Matrix, q: [3]f32) -> [3]f32 {
 		r := m * [4]f32{q.x, q.y, q.z, 1}
 		return r.xyz

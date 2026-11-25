@@ -65,7 +65,7 @@ main :: proc() {
 
 	opts, opts_ok := parse_options(os.args[1:])
 	if !opts_ok {
-		fmt.eprintln("usage: sandtable <cloud.spz|.ply> [--model file.glb] [--pos x,y,z] [--yaw deg] [--scale s] [--ground y]")
+		fmt.eprintln("usage: sandtable <cloud.spz|.ply> [--model file.glb] [--world-scale u] [--pos x,y,z] [--yaw deg] [--scale s] [--ground y]")
 		return
 	}
 	path := opts.cloud if len(opts.cloud) > 0 else "tree.ply"
@@ -250,7 +250,7 @@ main :: proc() {
 			// one or their depth does not line up with the splats'.
 			rlgl.SetMatrixProjection(proj_m)
 			// opaque object first: it writes depth, the splats test against it
-			if show_model do model_draw(model, placement.transform)
+			if show_model do model_draw(model, placement.transform, placement.world_scale)
 			if view.count > 0 {
 				splat_set_frame(&splat, view_m, proj_m, rw, rh, game_cam, cfg.crisp, crisp_alpha)
 				splat_draw(&splat, view, cfg.crisp)
@@ -307,12 +307,14 @@ main :: proc() {
 			"[C] camera  [-/+] pixel size  [S] ss  [R] reset | game: drag/arrows rotate, shift/right-drag pan, scroll zoom | free: drag orbit | drop a .spz or .ply",
 			10, 78, 16, {160, 160, 160, 255},
 		)
-		draw_model_hud(model, placement, model_err, 10, 98)
+		px_per_unit := f32(targets.h) / camera.fovy if game_cam else 0
+		draw_model_hud(model, placement, model_err, px_per_unit, 10, 98)
 		rl.EndDrawing()
 	}
 }
 
-draw_model_hud :: proc(a: Model_Asset, p: Placement, err: string, x, y: i32) {
+// px_per_unit: art pixels per world unit in the game camera, 0 in the free one
+draw_model_hud :: proc(a: Model_Asset, p: Placement, err: string, px_per_unit: f32, x, y: i32) {
 	if len(err) > 0 {
 		rl.DrawText(fmt.ctprintf("model load failed: %s", err), x, y, 18, {230, 90, 80, 255})
 		return
@@ -324,17 +326,33 @@ draw_model_hud :: proc(a: Model_Asset, p: Placement, err: string, x, y: i32) {
 	t := p.transform
 	yaw := t.rotation.y * math.DEG_PER_RAD
 	if yaw < 0 do yaw += 360
-	sz := a.size * t.scale
+	sz := object_size_m(a, t)
+	px := ""
+	if px_per_unit > 0 {
+		long_px := max(sz.x, sz.z) * p.world_scale * px_per_unit
+		px = fmt.tprintf(" | ~%.0f art px long, 1 m = %.1f px", long_px, p.world_scale * px_per_unit)
+	}
 	rl.DrawText(
 		fmt.ctprintf(
-			"%s | pos %.2f %.2f %.2f | yaw %.0f | scale %.3f | size %.2f x %.2f x %.2f (x y z) | ground %.2f%s",
-			a.path, t.position.x, t.position.y, t.position.z, yaw, t.scale.x,
-			sz.x, sz.y, sz.z, p.ground, "" if p.visible else " | hidden",
+			"%s | %.2f x %.2f x %.2f m (x y z) | scale %.3f | yaw %.0f%s%s",
+			a.path, sz.x, sz.y, sz.z, t.scale.x, yaw, px, "" if p.visible else " | hidden",
 		),
 		x, y, 16, {220, 200, 140, 255},
 	)
+
+	f := world_fmt(p.world_scale)
+	foot_m := max(sz.x, sz.z)
 	rl.DrawText(
-		"[IJKL] move  [Y/H] ground  [,/.] rotate 15 (shift 90)  [N/M] scale  [T] reset  [B] overlay  [V] hide  [F] print flags",
-		x, y + 20, 16, {160, 160, 160, 255},
+		fmt.ctprintf(
+			"world %.6f units/m | pos %s %s %s | ground %s | grid %v m",
+			p.world_scale,
+			fmt.tprintf(f, t.position.x), fmt.tprintf(f, t.position.y), fmt.tprintf(f, t.position.z),
+			fmt.tprintf(f, p.ground), grid_cell_m(max(foot_m, 1e-3) * 2),
+		),
+		x, y + 20, 16, {220, 200, 140, 255},
+	)
+	rl.DrawText(
+		"[IJKL] move  [Y/H] ground  [,/.] rotate 15 (shift 90)  [N/M] scale  [ctrl+N/M] world scale  [T] reset  [B] overlay  [V] hide  [F] print flags",
+		x, y + 40, 16, {160, 160, 160, 255},
 	)
 }
