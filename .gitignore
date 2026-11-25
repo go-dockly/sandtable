@@ -2,3 +2,4 @@ sandtable
 sandtable.exe
 *.bin
 *.pdb
+models/
