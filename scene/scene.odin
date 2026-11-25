@@ -19,6 +19,9 @@ package scene
 //     "maxTilt": 20,                  degrees
 //     "nextId": 4,                    ids are never reused, also across sessions
 //     "view": { "target": [x, y, z], "azimuth": 45, "viewHeight": 0.8 },
+//     "game": { "mission": "krakow.mission.json", "base": "krakow.mission.base.json",
+//               "origin": [x, z], "size": [w, h], "buildingsFromTerrain": true },
+//                                     the Commandos export, see game.odin
 //     "assets": [
 //       { "id": "volkswagen_82", "path": "../models/car/volkswagen_82.glb" }
 //     ],
@@ -79,6 +82,7 @@ Level :: struct {
 	max_tilt:     f32 `json:"maxTilt"`, // degrees
 	next_id:      u64 `json:"nextId"`,
 	view:         Maybe(View),
+	game:         Maybe(Game), // the Commandos export (game.odin); nil until the first one
 	assets:       []Asset_Ref,
 	objects:      []Object,
 }
@@ -99,6 +103,10 @@ destroy :: proc(l: ^Level) {
 	delete(l.id)
 	delete(l.title)
 	delete(l.terrain)
+	if g, ok := l.game.?; ok {
+		delete(g.mission)
+		delete(g.base)
+	}
 	l^ = {}
 }
 
@@ -146,6 +154,10 @@ encode :: proc(l: Level, allocator := context.allocator) -> string {
 	if v, ok := l.view.?; ok {
 		fmt.sbprintf(&b, "  \"view\": {{ \"target\": %s, \"azimuth\": %s, \"viewHeight\": %s }},\n",
 			vec(v.target), num(v.azimuth), num(v.view_height))
+	}
+	if g, ok := l.game.?; ok {
+		fmt.sbprintf(&b, "  \"game\": {{ \"mission\": %s, \"base\": %s, \"origin\": [%s, %s], \"size\": [%s, %s], \"buildingsFromTerrain\": %v }},\n",
+			quote(g.mission), quote(g.base), num(g.origin.x), num(g.origin.y), num(g.size.x), num(g.size.y), game_buildings(g))
 	}
 
 	w(&b, "  \"assets\": [")
@@ -313,6 +325,7 @@ Header :: struct {
 	terrain_cell: f32,
 	max_tilt:     f32, // radians, as the editor keeps it
 	view:         Maybe(View),
+	game:         Maybe(Game),
 }
 
 // A level from the editor's instances. asset_paths[i] is asset i's path,
@@ -331,6 +344,11 @@ build :: proc(ed: ^editor.Editor, asset_paths: []string, h: Header, allocator :=
 		max_tilt     = h.max_tilt * math.DEG_PER_RAD,
 		next_id      = max(ed.next_id, 1),
 		view         = h.view,
+	}
+	if g, ok := h.game.?; ok {
+		g.mission = strings.clone(g.mission)
+		g.base = strings.clone(g.base)
+		l.game = g
 	}
 
 	// asset index -> id, for the assets in use, in order of first use

@@ -107,6 +107,7 @@ Level:
 |-----|------|
 | `ctrl` (`cmd`) + `S` | save the level |
 | `ctrl` (`cmd`) + `R` | reload it from disk, dropping unsaved changes (asks with a second press) |
+| `ctrl` (`cmd`) + `E` | export the Commandos mission (see *Commandos export* below) |
 | drop a `.json` | open that level |
 
 Terrain:
@@ -131,7 +132,9 @@ Game camera: 38° Commandos tilt stays fixed. Left-drag or a sideways two-finger
 | `model.odin` | GLB objects as raylib meshes in the splat pass; pivot, palette & lighting lessons from pixlsplat's models |
 | `placement.odin` | objects in the level: loaded models, keyboard & mouse input, command line, drawing, editor overlay (Blocks 1, 2, 5) |
 | `scene/` | Block 3 without raylib: the level file, JSON read & write, asset references, paths relative to the level, id checks. `odin test scene` |
-| `level.odin` | Block 3 glue: open, save, reload, autosave, missing models, level HUD |
+| `level.odin` | Block 3 glue: open, save, reload, autosave, missing models, level HUD; the Commandos export |
+| `scene/game.odin` | level -> Commandos mission: game region, captured buildings, object footprints, props, merge into the designer's base mission |
+| `tools/commandos_check/` | runs an export through commandos' own loader, collision and A* (needs `../commandos`) |
 | `editor/` | Block 2 without raylib: instances with stable ids, the select / place / move state machine, cursor rays, object picking, click-or-drag, terrain snap (Block 5). `odin test editor` |
 | `terrain/terrain.odin` | Block 5 terrain proxy: heightmaps from the cloud, height / normal / footprint sampling, ray picking, export. No raylib: `odin test terrain` |
 | `terrain_view.odin` | builds the terrain at load, grey-box mesh, terrain HUD |
@@ -182,6 +185,32 @@ Safe by default:
 - A model that does not load stays in the level (its objects are kept, just not drawn), and dropping that model later brings them back.
 - Duplicate or missing ids get fresh ones, and unknown fields are ignored, with a warning for each fix.
 
+## Commandos export
+
+`ctrl+E` writes a mission that [commandos](https://github.com/algo-boyz/commandos) loads as it is (`mission/mission.odin`), next to the level by default: `levels/krakow.mission.json`.
+
+The game plays in 2D, top-down, one unit a metre (a guard is 0.8 across). The export maps one metre of the capture to one game unit: game x, y = world x, z minus the region's corner, divided by the world scale. The axes are the same, so nothing is mirrored. The region (corner and size) is kept in the level's `game` section, so adding a car later doesn't move every coordinate a designer has typed. It defaults to the whole terrain; edit `origin` and `size` in the level to cut out a smaller map. The HUD shows the cursor in game units, for typing spawns and patrols.
+
+| Mission field | From |
+|---------------|------|
+| `buildings` | the base mission's, then the capture's structures (terrain cells 2 m and more above the ground) on the game's 1 m grid, merged into rectangles. `height` (metres) is extra |
+| `cover` | the base mission's, then each object's footprint as `crate` rectangles. The game's solids are axis-aligned, so a turned car is traced on a 25 cm grid; crates block movement and sight |
+| `props` | every object, for drawing its GLB in the game later: asset, x, y, elevation (m), yaw, scale, tilt, size. The game ignores it for now |
+| `coordinateSpace` | the region |
+| `playerSpawn`, `extraction`, `objective`, `walls`, `guards`, anything else | the designer's `levels/krakow.mission.base.json`, untouched. Without one: no guards, and a spawn on open ground near the middle |
+| `sandtable` | the level it came from, the region's corner, world scale, ground height: how to map back |
+
+Gameplay is never written by sandtable: keep it in the base file and re-export. The generated mission says so in its `sandtable.note`.
+
+To play it, with the patch that lets commandos take a mission path:
+
+```
+cd ../commandos
+odin run . -- ../sandtable/levels/krakow.mission.json
+```
+
+Limits: trees are structures too, so their canopies become blocks, and a region much over 200 × 200 m makes the game's grid A* slow.
+
 ## Terrain
 
 At load the cloud is turned into two heightmaps over an x/z grid (`terrain/terrain.odin`; ~0.25 s for 0.5 M splats, ~0.6 s for 3 M):
@@ -214,6 +243,7 @@ Tests: a synthetic street with a slope, a building with no ground under it, a tr
 odin test terrain
 odin test editor
 odin test scene
+odin run tools/commandos_check -collection:cmd=../commandos -collection:st=.
 ```
 
 
@@ -684,6 +714,8 @@ Goal: the Volkswagen exists in Krakow
 - Game camera preview.
 
 **Deliverable:** construct an actual playable mission layout.
+
+**Status:** export done ahead of the rest. `ctrl+E` writes a commandos `mission.json` with the capture's buildings and the objects' footprints merged into the designer's base mission; checked against commandos' own loader, collision and A* (`tools/commandos_check`). Next: undo/redo. See *Commandos export* above and `docs/game_export.md`.
 
 ## **9. What I'd deliberately postpone**
 
