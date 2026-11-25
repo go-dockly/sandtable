@@ -31,6 +31,12 @@ odin run . -o:speed -- ../ospz/models/krakow.spz --world-scale 0.005 --model ass
 | `--yaw deg` | rotation around the vertical axis |
 | `--world-scale u` | world units per metre of the splat capture, default 1. Krakow is ~0.005. GLBs are in metres and are multiplied by this |
 | `--scale s` | object scale on top of the world scale, default 1 = real size |
+| `--snap m` | where the object's height comes from: `ground` (terrain, default), `surface` (terrain incl. roofs), `plane` (the `--ground` plane) |
+| `--offset y` | height above the terrain, world units (manual elevation override) |
+| `--align` | tilt the object to the slope under its footprint |
+| `--max-tilt deg` | steepest alignment, default 20 |
+| `--cell m` | terrain cell size in metres; default 0.5 m, coarsened automatically for sparse clouds |
+| `--terrain-export prefix` | write the heightmaps after each terrain build (see *Terrain* below) |
 
 `F` prints the current placement as these flags, so a placement found by eye can be reproduced.
 
@@ -52,8 +58,10 @@ Object (with `--model`):
 
 | Key | Does |
 |-----|------|
-| `I` `J` `K` `L` | move along the ground, relative to the view (shift: faster) |
-| `Y` `H` | raise / lower the ground plane; the object stays on it |
+| `I` `J` `K` `L` | move along the ground, relative to the view (shift: faster); the object follows the terrain |
+| `Y` `H` | snapped: raise / lower the object above the terrain. Plane: raise / lower the plane |
+| `Z` | snap: terrain ground / terrain surface (roofs) / plane |
+| `U` | align to the slope under the footprint / upright |
 | `,` `.` | rotate 15° left / right (shift: 90°) |
 | `N` `M` | object scale down / up (shift: faster) |
 | `ctrl` + `N` `M` | world scale down / up: calibrate the capture against a known-size object |
@@ -61,6 +69,13 @@ Object (with `--model`):
 | `B` | overlay: ground grid in whole metres, bounds, pivot, model +Z |
 | `V` | hide / show the object |
 | `F` | print the placement as command-line flags |
+
+Terrain:
+
+| Key | Does |
+|-----|------|
+| `Tab` | view: splats / grey-box / both (grey-box under the splats) |
+| `shift` + `Z` | rebuild the terrain, e.g. after calibrating the world scale |
 
 Game camera: 38° Commandos tilt stays fixed. Left-drag or a sideways two-finger swipe rotates around the vertical axis, `←` `→` rotate by 90°, shift + left-drag (or right/middle-drag) pans, vertical scroll zooms, `R` returns to 45°. Free camera: left-drag orbits, wheel zooms.
 
@@ -75,7 +90,41 @@ Game camera: 38° Commandos tilt stays fixed. Left-drag or a sideways two-finger
 | `splat.odin` | loader, sort & shader from `ospz/viewer/main.odin`, with ortho projection & a hard mode added |
 | `main.odin` | pass sequencing from `pixlsplat/src/main.odin` |
 | `model.odin` | GLB objects as raylib meshes in the splat pass; pivot, palette & lighting lessons from pixlsplat's models |
-| `placement.odin` | Block 1 placement: transform, ground plane, keyboard controls, command line, editor overlay |
+| `placement.odin` | Block 1 placement: transform, ground plane, keyboard controls, command line, editor overlay. Block 5: terrain snap, offset, slope alignment |
+| `terrain/terrain.odin` | Block 5 terrain proxy: heightmaps from the cloud, height / normal / footprint sampling, ray picking, export. No raylib: `odin test terrain` |
+| `terrain_view.odin` | builds the terrain at load, grey-box mesh, terrain HUD |
+
+## Terrain
+
+At load the cloud is turned into two heightmaps over an x/z grid (`terrain/terrain.odin`; ~0.25 s for 0.5 M splats, ~0.6 s for 3 M):
+
+- **surface** (DSM): the top of whatever is there, roofs and canopies included. A high quantile of the splat heights per cell, single-cell spikes (sky blobs) removed.
+- **ground** (DTM): bare ground. Per cell, the lowest height at least 3 splats agree on, so a street cell beside a wall still finds the street and a stray splat under it does not count. A progressive morphological filter (Zhang et al. 2003) then removes everything narrower than 40 m (buildings, trees, cars), and the holes are filled smoothly from the ground around them.
+
+Each cell is classed *empty* (no splats), *ground*, *object* (0.5–2 m above the ground: cars, hedges) or *structure* (2 m and more: buildings, walls, trees). Splats below 0.2 opacity are ignored. The defaults are in metres and go through the world scale, so set `--world-scale` (or calibrate with ctrl+N/M, then shift+Z) before trusting the terrain of a non-metric capture. Cells are 0.5 m; a sparse cloud gets coarser cells until a typical cell holds 8 splats.
+
+The object stands on the plane fitted through 5×5 terrain samples under its footprint (turned with its yaw): the plane's height at the pivot plus the offset, and with `U` its normal, clamped to `--max-tilt`.
+
+`Tab` shows the terrain as a grey-box drawn like a GLB object (lit, depth tested against the splats, through the pixel-art pass): the ground as a smooth surface, structures as blocks. It is the quickest check of what placement sees, and the start of a grey-box of the level.
+
+`--terrain-export out/krakow` writes:
+
+| File | Holds |
+|------|-------|
+| `krakow.ground.pgm` | ground, 16 bit, 0..65535 = `heightMin`..`heightMax` |
+| `krakow.surface.pgm` | surface, same scale |
+| `krakow.class.pgm` | 8 bit: 0 empty, 85 ground, 170 object, 255 structure |
+| `krakow.terrain.json` | origin (world x, z of the corner of cell (0, 0)), cell size, grid size, height range, world scale, build parameters |
+
+Row 0 is the lowest z, column 0 the lowest x; heights are world units (divide by `worldScale` for metres).
+
+Limits: one height per x/z, so walls are steps between cells and bridges, overhangs and interiors are not represented. Flat roofs wider than 40 m count as ground. The ground under a parked car is only as good as the street splats around it.
+
+Tests: a synthetic street with a slope, a building with no ground under it, a tree, a car, haze, sky blobs & splats under the street, also at Krakow's world scale.
+
+```
+odin test terrain
+```
 
 
 The hard part of a viewer: loading & rendering a 3D Gaussian Splatting scene is in. The next step isn't to turn it into Blender, but to follow a focused mission:
@@ -225,7 +274,7 @@ This lets us test model loading, picking, transforms, camera behavior & persiste
 
 It will not correctly follow the height of sloping roads.
 
-### **B — Terrain heightmap (our next step)**
+### **B — Terrain heightmap (implemented, Block 5)**
 
 Create a terrain sampling representation from the reconstruction.
 
@@ -527,6 +576,8 @@ Goal: the Volkswagen exists in Krakow
 - Manual elevation override.
 
 **Deliverable:** objects naturally sit on Krakow's uneven terrain.
+
+**Status:** implemented ahead of Blocks 2–4. Ground & surface heightmaps are built from the cloud at load; the object snaps to the ground (or the surface, or the old plane) with an offset and optional slope alignment from its footprint. Grey-box view (`Tab`) and an export of the heightmaps as 16-bit PGMs + JSON. `terrain.raycast` is ready for Block 2's mouse picking. See *Terrain* above.
 
 ## **Block 6 — Commandos workflow**
 
