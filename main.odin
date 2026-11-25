@@ -15,13 +15,16 @@ package main
 // Pass 2 (post.odin, from pixlsplat) resolves it to palette-snapped, outlined
 // pixel art at the art resolution. The result is scaled up with nearest-neighbour.
 //
-// A GLB object (model.odin, placement.odin) is drawn into the pass 1 target
-// before the splats, with the same view & projection, so it is depth tested
-// against the cloud and resolved by the same pixel-art pass.
+// GLB objects (model.odin, placement.odin) are drawn into the pass 1 target
+// before the splats, with the same view & projection, so they are depth tested
+// against the cloud and resolved by the same pixel-art pass. They are placed
+// and picked with the mouse (editor/): the cursor's ray is unprojected through
+// that same view & projection.
 //
 // The terrain proxy (terrain/, terrain_view.odin) is built from the cloud at
-// load: the object stands on it, and its grey-box can be drawn in the same
-// place as the object, instead of or under the splats.
+// load: the objects stand on it, the cursor finds the ground on it, and its
+// grey-box can be drawn in the same place as the objects, instead of or under
+// the splats.
 
 import "core:fmt"
 import "core:math"
@@ -30,6 +33,8 @@ import "core:os"
 
 import rl "vendor:raylib"
 import rlgl "vendor:raylib/rlgl"
+
+import "editor"
 
 BACKGROUND :: [4]u8{16, 14, 20, 255}
 
@@ -65,6 +70,7 @@ main :: proc() {
 	rl.SetConfigFlags({.WINDOW_RESIZABLE, .VSYNC_HINT})
 	rl.InitWindow(1280, 720, "sandtable")
 	defer rl.CloseWindow()
+	rl.SetExitKey(.KEY_NULL) // Esc cancels placing; close the window to quit
 	rl.SetTargetFPS(60)
 
 	opts, opts_ok := parse_options(os.args[1:])
@@ -105,20 +111,17 @@ main :: proc() {
 	}
 	defer model_shader_unload(&model_shader)
 
-	model: Model_Asset
-	defer release_model_asset(&model)
+	placement := Placement{overlay = true, visible = true}
+	defer placement_destroy(&placement)
 	// path of a model that failed to load; a copy, as dropped paths die with
 	// UnloadDroppedFiles
 	model_err_buf: [512]u8
 	model_err := ""
 	if len(opts.model) > 0 {
-		if m, ok := load_model_asset(opts.model, model_shader.shader); ok {
-			model = m
-		} else {
+		if _, ok := placement_load_asset(&placement, opts.model, model_shader.shader); !ok {
 			model_err = fmt.bprint(model_err_buf[:], opts.model)
 		}
 	}
-	placement := Placement{overlay = true, visible = true}
 	placement_reset(&placement, opts, view)
 
 	ground_proxy := World_Terrain{cell_m = opts.cell_m, export = opts.export}
@@ -136,7 +139,7 @@ main :: proc() {
 	free_cam: rl.Camera3D
 	iso: Iso
 	frame_views(&free_cam, &iso, view)
-	apply_palette(&post, palette_mode, view, model.colors)
+	apply_palette(&post, palette_mode, view, placement_colors(&placement))
 
 	last_fwd: [3]f32
 	last_pos: [3]f32
@@ -148,12 +151,13 @@ main :: proc() {
 			if files.count > 0 {
 				p := string(files.paths[0])
 				if is_model_path(p) {
-					// swap the object, keep where it stands
-					if m, ok := load_model_asset(p, model_shader.shader); ok {
-						release_model_asset(&model)
-						model = m
+					// load it (once) and start placing it
+					if idx, ok := placement_load_asset(&placement, p, model_shader.shader); ok {
+						template := placement.template
+						template.asset = idx
+						placement_begin_place(&placement, template)
 						model_err = ""
-						apply_palette(&post, palette_mode, view, model.colors)
+						apply_palette(&post, palette_mode, view, placement_colors(&placement))
 					} else {
 						model_err = fmt.bprint(model_err_buf[:], p)
 					}
@@ -166,7 +170,7 @@ main :: proc() {
 						frame_views(&free_cam, &iso, view)
 						placement_reset(&placement, opts, view)
 						world_terrain_build(&ground_proxy, view, placement.world_scale, model_shader.shader)
-						apply_palette(&post, palette_mode, view, model.colors)
+						apply_palette(&post, palette_mode, view, placement_colors(&placement))
 						last_fwd = {}
 					} else {
 						load_err = e
@@ -191,9 +195,8 @@ main :: proc() {
 			} else {
 				palette_mode = .Extracted
 			}
-			apply_palette(&post, palette_mode, view, model.colors)
+			apply_palette(&post, palette_mode, view, placement_colors(&placement))
 		}
-		if rl.IsKeyPressed(.T) do placement_reset(&placement, opts, view)
 		shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 		if rl.IsKeyPressed(.Z) && shift {
 			world_terrain_build(&ground_proxy, view, placement.world_scale, model_shader.shader)
@@ -220,33 +223,22 @@ main :: proc() {
 		targets_resize(&targets, art_w, art_h)
 
 		// ---- camera ----------------------------------------------------------
+		// a left press only turns the camera once it is a drag, so a click
+		// can place or select (editor.Click)
+		left_drag := placement.click.dragged
 		camera: rl.Camera3D
 		if game_cam {
-			iso_update(&iso, f32(art_h * pixel_size))
+			iso_update(&iso, f32(art_h * pixel_size), left_drag)
 			camera = iso_camera(iso)
 		} else {
-			update_orbit(&free_cam)
+			update_orbit(&free_cam, left_drag)
 			camera = free_cam
 		}
 		near, far := clip_planes(view.extent, game_cam, iso.distance)
-		if model.model.meshCount > 0 {
-			placement_update(&placement, camera, max(view.extent, 1e-4) if view.count > 0 else 1, rl.GetFrameTime(), ground_proxy.ok)
-			placement_settle(&placement, model, ground_proxy.t, ground_proxy.ok)
-		}
 
-		fwd := linalg.normalize(camera.target - camera.position)
-		if view.count > 0 &&
-		   (linalg.dot(fwd, last_fwd) < 0.9995 ||
-			linalg.vector_length(camera.position - last_pos) > 0.01 * view.extent) {
-			sort_order(&view, camera.position, fwd, far)
-			rl.UpdateTexture(view.order_tex, raw_data(view.order_px))
-			last_fwd, last_pos = fwd, camera.position
-		}
-
-		// ---- pass 1: object + splats into a transparent, premultiplied target -
+		// the scene pass's view & projection, also for the cursor's ray
 		rt := targets.scene[cfg.ss]
 		rw, rh := f32(rt.texture.width), f32(rt.texture.height)
-
 		aspect := rw / rh
 		view_m := rl.GetCameraMatrix(camera)
 		proj_m: rl.Matrix
@@ -257,7 +249,28 @@ main :: proc() {
 		} else {
 			proj_m = rl.MatrixPerspective(camera.fovy, aspect, near, far)
 		}
-		show_model := model.model.meshCount > 0 && placement.visible
+		// the picture is drawn at (0, 0), art size * pixel size
+		pic_w, pic_h := f32(targets.w * pixel_size), f32(targets.h * pixel_size)
+
+		// ---- objects: keyboard, then mouse, then onto the terrain --------------
+		placement_keys(&placement, camera, max(view.extent, 1e-4) if view.count > 0 else 1, rl.GetFrameTime(), ground_proxy.ok)
+		mouse := rl.GetMousePosition()
+		on_picture := mouse.x >= 0 && mouse.y >= 0 && mouse.x < min(pic_w, f32(rl.GetScreenWidth())) && mouse.y < min(pic_h, f32(rl.GetScreenHeight()))
+		ray, ray_ok := editor.screen_ray(linalg.inverse(proj_m * view_m), editor.ndc_from_screen(mouse, pic_w, pic_h))
+		placement_mouse(&placement, ray, ray_ok && on_picture, mouse, ground_proxy.t, ground_proxy.ok)
+		placement_settle(&placement, ground_proxy.t, ground_proxy.ok)
+
+		fwd := linalg.normalize(camera.target - camera.position)
+		if view.count > 0 &&
+		   (linalg.dot(fwd, last_fwd) < 0.9995 ||
+			linalg.vector_length(camera.position - last_pos) > 0.01 * view.extent) {
+			sort_order(&view, camera.position, fwd, far)
+			rl.UpdateTexture(view.order_tex, raw_data(view.order_px))
+			last_fwd, last_pos = fwd, camera.position
+		}
+
+		// ---- pass 1: objects + splats into a transparent, premultiplied target
+		show_model := placement.visible && placement_has_objects(&placement)
 		show_box := ground_proxy.ok && ground_proxy.view != .Splats
 		show_splats := view.count > 0 && ground_proxy.view != .Greybox
 
@@ -269,8 +282,8 @@ main :: proc() {
 			// distances; the splat shader uses proj_m. Meshes must use the same
 			// one or their depth does not line up with the splats'.
 			rlgl.SetMatrixProjection(proj_m)
-			// opaque object first: it writes depth, the splats test against it
-			if show_model do model_draw(model, placement.transform, placement.world_scale)
+			// opaque objects first: they write depth, the splats test against them
+			if show_model do placement_draw(&placement)
 			if show_box do greybox_draw(ground_proxy.box)
 			if show_splats {
 				splat_set_frame(&splat, view_m, proj_m, rw, rh, game_cam, cfg.crisp, crisp_alpha)
@@ -286,11 +299,9 @@ main :: proc() {
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
 		src := rl.Rectangle{0, 0, f32(targets.w), -f32(targets.h)} // render textures are upside down
-		dst := rl.Rectangle{0, 0, f32(targets.w * pixel_size), f32(targets.h * pixel_size)}
+		dst := rl.Rectangle{0, 0, pic_w, pic_h}
 		rl.DrawTexturePro(targets.art.texture, src, dst, {0, 0}, 0, rl.WHITE)
-		if show_model && placement.overlay {
-			draw_placement_overlay(model, placement, view_m, proj_m, dst.width, dst.height, ground_proxy.t, ground_proxy.ok)
-		}
+		draw_placement_overlay(&placement, view_m, proj_m, dst.width, dst.height, ground_proxy.t, ground_proxy.ok)
 
 		title := view.name if len(view.name) > 0 else path
 		rl.DrawText(fmt.ctprintf("%s", title), 10, 10, 20, rl.RAYWHITE)
@@ -329,53 +340,86 @@ main :: proc() {
 			10, 78, 16, {160, 160, 160, 255},
 		)
 		px_per_unit := f32(targets.h) / camera.fovy if game_cam else 0
-		draw_model_hud(model, placement, model_err, px_per_unit, 10, 98)
-		draw_terrain_hud(ground_proxy, placement, model.model.meshCount > 0, 10, 158)
+		draw_model_hud(&placement, model_err, px_per_unit, 10, 98)
+		draw_terrain_hud(ground_proxy, &placement, 10, 178)
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 	}
 }
 
 // px_per_unit: art pixels per world unit in the game camera, 0 in the free one
-draw_model_hud :: proc(a: Model_Asset, p: Placement, err: string, px_per_unit: f32, x, y: i32) {
+draw_model_hud :: proc(p: ^Placement, err: string, px_per_unit: f32, x, y: i32) {
+	info := rl.Color{220, 200, 140, 255}
+	keys := rl.Color{160, 160, 160, 255}
 	if len(err) > 0 {
 		rl.DrawText(fmt.ctprintf("model load failed: %s", err), x, y, 18, {230, 90, 80, 255})
 		return
 	}
-	if a.model.meshCount <= 0 {
-		rl.DrawText("no object: --model file.glb, or drop a .glb", x, y, 16, {160, 160, 160, 255})
+	if len(p.assets) == 0 {
+		rl.DrawText("no object: --model file.glb, or drop a .glb", x, y, 16, keys)
 		return
 	}
-	t := p.transform
-	yaw := t.rotation.y * math.DEG_PER_RAD
-	if yaw < 0 do yaw += 360
-	sz := object_size_m(a, t)
-	px := ""
-	if px_per_unit > 0 {
-		long_px := max(sz.x, sz.z) * p.world_scale * px_per_unit
-		px = fmt.tprintf(" | ~%.0f art px long, 1 m = %.1f px", long_px, p.world_scale * px_per_unit)
+
+	// mode line
+	ed := &p.ed
+	n := len(ed.instances)
+	plural := "" if n == 1 else "s"
+	mode: string
+	switch ed.mode {
+	case .Place:
+		a := asset_of(p, ed.preview)
+		mode = fmt.tprintf(
+			"PLACE %s | click: put one down  Esc: stop | %d object%s%s",
+			a.path if a != nil else "?", n, plural, "" if p.cursor_ok else " | cursor off the ground",
+		)
+	case .Move:
+		mode = fmt.tprintf("MOVE #%d | click: put it down  Esc: undo the move | %d object%s", ed.selected, n, plural)
+	case .Select:
+		sel := fmt.tprintf("#%d selected", ed.selected) if ed.selected != 0 else "nothing selected"
+		hover := fmt.tprintf(" | under the cursor: #%d", p.hover) if p.hover != 0 && p.hover != ed.selected else ""
+		mode = fmt.tprintf("SELECT | %d object%s, %s%s", n, plural, sel, hover)
+	}
+	rl.DrawText(fmt.ctprintf("%s%s", mode, "" if p.visible else " | hidden"), x, y, 16, {140, 220, 255, 255})
+
+	act := editor.active(ed)
+	a: ^Model_Asset
+	if act != nil do a = asset_of(p, act^)
+	if act == nil || a == nil {
+		rl.DrawText(
+			fmt.ctprintf("click an object to select it | world %.6f units/m", p.world_scale),
+			x, y + 20, 16, info,
+		)
+	} else {
+		t := act.transform
+		yaw := editor.wrap_yaw(t.rotation.y) * math.DEG_PER_RAD
+		sz := object_size_m(a^, t)
+		px := ""
+		if px_per_unit > 0 {
+			long_px := max(sz.x, sz.z) * p.world_scale * px_per_unit
+			px = fmt.tprintf(" | ~%.0f art px long, 1 m = %.1f px", long_px, p.world_scale * px_per_unit)
+		}
+		other := fmt.tprintf("  [O] next of %d models", len(p.assets)) if len(p.assets) > 1 else ""
+		rl.DrawText(
+			fmt.ctprintf(
+				"%s | %.2f x %.2f x %.2f m (x y z) | scale %.3f | yaw %.0f%s%s",
+				a.path, sz.x, sz.y, sz.z, t.scale.x, yaw, px, other,
+			),
+			x, y + 20, 16, info,
+		)
+		f := world_fmt(p.world_scale)
+		foot_m := max(sz.x, sz.z)
+		rl.DrawText(
+			fmt.ctprintf(
+				"world %.6f units/m | pos %s %s %s | ground %s | grid %v m",
+				p.world_scale,
+				fmt.tprintf(f, t.position.x), fmt.tprintf(f, t.position.y), fmt.tprintf(f, t.position.z),
+				fmt.tprintf(f, act.ground), grid_cell_m(max(foot_m, 1e-3) * 2),
+			),
+			x, y + 40, 16, info,
+		)
 	}
 	rl.DrawText(
-		fmt.ctprintf(
-			"%s | %.2f x %.2f x %.2f m (x y z) | scale %.3f | yaw %.0f%s%s",
-			a.path, sz.x, sz.y, sz.z, t.scale.x, yaw, px, "" if p.visible else " | hidden",
-		),
-		x, y, 16, {220, 200, 140, 255},
-	)
-
-	f := world_fmt(p.world_scale)
-	foot_m := max(sz.x, sz.z)
-	rl.DrawText(
-		fmt.ctprintf(
-			"world %.6f units/m | pos %s %s %s | ground %s | grid %v m",
-			p.world_scale,
-			fmt.tprintf(f, t.position.x), fmt.tprintf(f, t.position.y), fmt.tprintf(f, t.position.z),
-			fmt.tprintf(f, p.ground), grid_cell_m(max(foot_m, 1e-3) * 2),
-		),
-		x, y + 20, 16, {220, 200, 140, 255},
-	)
-	rl.DrawText(
-		"[IJKL] move  [Y/H] ground / offset  [,/.] rotate 15 (shift 90)  [N/M] scale  [ctrl+N/M] world scale  [T] reset  [B] overlay  [V] hide  [F] print flags",
-		x, y + 40, 16, {160, 160, 160, 255},
+		"click select / place  [A] place  [W] move  [Del] delete  [Esc] cancel | [IJKL] nudge  [Y/H] offset  [,/.] rotate (shift 90)  [N/M] scale  [ctrl+N/M] world  [T] reset  [B] overlay  [V] hide  [F] flags",
+		x, y + 60, 16, keys,
 	)
 }

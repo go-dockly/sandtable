@@ -25,8 +25,8 @@ odin run . -o:speed -- ../ospz/models/krakow.spz --world-scale 0.005 --model ass
 
 | Flag | Does |
 |------|------|
-| `--model file.glb` | object to place (`.glb` / `.gltf`); a `.glb` can also be dropped on the window |
-| `--pos x,y,z` | where its pivot (bottom centre) stands; `y` sets the ground plane |
+| `--model file.glb` | object to place (`.glb` / `.gltf`); more models can be dropped on the window |
+| `--pos x,y,z` | where the first object's pivot (bottom centre) stands; `y` sets the ground plane |
 | `--ground y` | ground plane height; default: 5th percentile of the cloud's heights |
 | `--yaw deg` | rotation around the vertical axis |
 | `--world-scale u` | world units per metre of the splat capture, default 1. Krakow is ~0.005. GLBs are in metres and are multiplied by this |
@@ -38,7 +38,7 @@ odin run . -o:speed -- ../ospz/models/krakow.spz --world-scale 0.005 --model ass
 | `--cell m` | terrain cell size in metres; default 0.5 m, coarsened automatically for sparse clouds |
 | `--terrain-export prefix` | write the heightmaps after each terrain build (see *Terrain* below) |
 
-`F` prints the current placement as these flags, so a placement found by eye can be reproduced.
+`F` prints the selected object as these flags (`shift+F`: every object), so a placement found by eye can be reproduced. The flags set up the first object; the rest are placed with the mouse (saving a level is Block 3).
 
 The HUD shows the object's size in metres, positions with enough decimals for ~1 cm at the current world scale, and in the game camera how many art pixels the object spans, to judge sprite readability.
 
@@ -54,21 +54,43 @@ The HUD shows the object's size in metres, positions with enough decimals for ~1
 | `[` `]` | hard mode: drop splats below this opacity |
 | `R` | reframe |
 
-Object (with `--model`):
+Objects (with `--model`, or a `.glb` dropped on the window):
+
+| Input | Does |
+|-------|------|
+| mouse move | placing / moving: the object follows the cursor over the terrain |
+| left-click | placing: put a copy down and keep placing. Moving: put it down. Otherwise: select the object under the cursor, or deselect |
+| `A` | place copies of the selected object (or of the last one placed) |
+| `W` | move the selected object with the mouse |
+| `Delete` / `Backspace` | delete the selected object |
+| `Esc` | stop placing / undo the move / deselect |
+| `O` | next loaded model for the selected object or the preview |
+| drop a `.glb` | load it and start placing it |
+
+A left press only clicks if the cursor stays within 5 px; a longer drag still turns the camera. `Esc` no longer quits: close the window.
+
+The keys edit the preview while placing, otherwise the selected object:
 
 | Key | Does |
 |-----|------|
-| `I` `J` `K` `L` | move along the ground, relative to the view (shift: faster); the object follows the terrain |
-| `Y` `H` | snapped: raise / lower the object above the terrain. Plane: raise / lower the plane |
+| `I` `J` `K` `L` | nudge along the ground, relative to the view (shift: faster); not while placing or moving, where the mouse moves it |
+| `Y` `H` | snapped: raise / lower the object above the terrain. Plane: raise / lower its plane |
 | `Z` | snap: terrain ground / terrain surface (roofs) / plane |
 | `U` | align to the slope under the footprint / upright |
 | `,` `.` | rotate 15° left / right (shift: 90°) |
 | `N` `M` | object scale down / up (shift: faster) |
+| `T` | back to the start placement (the command line's); keeps the model |
+| `F` | print it as command-line flags (`shift+F`: every object) |
+
+For every object:
+
+| Key | Does |
+|-----|------|
 | `ctrl` + `N` `M` | world scale down / up: calibrate the capture against a known-size object |
-| `T` | back to the start placement |
-| `B` | overlay: ground grid in whole metres, bounds, pivot, model +Z |
-| `V` | hide / show the object |
-| `F` | print the placement as command-line flags |
+| `B` | overlay: every object's bounds; ground grid in whole metres, pivot and model +Z of the selected one |
+| `V` | hide / show the objects |
+
+The selection is outlined yellow, the preview (or the object being moved) cyan, the object under the cursor white.
 
 Terrain:
 
@@ -90,7 +112,8 @@ Game camera: 38° Commandos tilt stays fixed. Left-drag or a sideways two-finger
 | `splat.odin` | loader, sort & shader from `ospz/viewer/main.odin`, with ortho projection & a hard mode added |
 | `main.odin` | pass sequencing from `pixlsplat/src/main.odin` |
 | `model.odin` | GLB objects as raylib meshes in the splat pass; pivot, palette & lighting lessons from pixlsplat's models |
-| `placement.odin` | Block 1 placement: transform, ground plane, keyboard controls, command line, editor overlay. Block 5: terrain snap, offset, slope alignment |
+| `placement.odin` | objects in the level: loaded models, keyboard & mouse input, command line, drawing, editor overlay (Blocks 1, 2, 5) |
+| `editor/` | Block 2 without raylib: instances with stable ids, the select / place / move state machine, cursor rays, object picking, click-or-drag, terrain snap (Block 5). `odin test editor` |
 | `terrain/terrain.odin` | Block 5 terrain proxy: heightmaps from the cloud, height / normal / footprint sampling, ray picking, export. No raylib: `odin test terrain` |
 | `terrain_view.odin` | builds the terrain at load, grey-box mesh, terrain HUD |
 
@@ -124,6 +147,7 @@ Tests: a synthetic street with a slope, a building with no ground under it, a tr
 
 ```
 odin test terrain
+odin test editor
 ```
 
 
@@ -547,6 +571,8 @@ Goal: the Volkswagen exists in Krakow
 
 **Deliverable:** actually position several vehicles without restarting.
 
+**Status:** implemented. Any number of objects, from any number of loaded GLBs (`--model`, then drop more). The cursor's ray is unprojected through the scene pass's own view & projection and meets the terrain's surface (`terrain.raycast`), so the object lands on what is drawn under the cursor and then stands on its own snap layer. `A` places with a preview that follows the cursor (each click stamps a copy), a click selects (ray against each object's oriented bounds, not through buildings), `W` moves the selection, `Delete` removes it, `Esc` cancels, `,` `.` rotate. Instances have stable ids for Block 3. The logic is in `editor/` without raylib and is unit tested. See `docs/placement.md`.
+
 ## **Block 3 — Scene persistence**
 
 - Scene data structures.
@@ -577,7 +603,7 @@ Goal: the Volkswagen exists in Krakow
 
 **Deliverable:** objects naturally sit on Krakow's uneven terrain.
 
-**Status:** implemented ahead of Blocks 2–4. Ground & surface heightmaps are built from the cloud at load; the object snaps to the ground (or the surface, or the old plane) with an offset and optional slope alignment from its footprint. Grey-box view (`Tab`) and an export of the heightmaps as 16-bit PGMs + JSON. `terrain.raycast` is ready for Block 2's mouse picking. See *Terrain* above.
+**Status:** implemented ahead of Blocks 2–4. Ground & surface heightmaps are built from the cloud at load; each object snaps to the ground (or the surface, or the old plane) with an offset and optional slope alignment from its footprint. Grey-box view (`Tab`) and an export of the heightmaps as 16-bit PGMs + JSON. `terrain.raycast` does Block 2's mouse picking. See *Terrain* above.
 
 ## **Block 6 — Commandos workflow**
 

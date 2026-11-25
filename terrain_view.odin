@@ -17,6 +17,7 @@ import "core:time"
 import rl "vendor:raylib"
 import rlgl "vendor:raylib/rlgl"
 
+import "editor"
 import "terrain"
 
 Terrain_View :: enum {
@@ -295,7 +296,7 @@ cross3 :: proc(a, b: [3]f32) -> [3]f32 {
 	return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}
 }
 
-draw_terrain_hud :: proc(wt: World_Terrain, p: Placement, has_model: bool, x, y: i32) {
+draw_terrain_hud :: proc(wt: World_Terrain, p: ^Placement, x, y: i32) {
 	col := rl.Color{170, 210, 170, 255}
 	if !wt.ok {
 		rl.DrawText("terrain: none (placement on the ground plane)", x, y, 16, {200, 150, 120, 255})
@@ -315,14 +316,15 @@ draw_terrain_hud :: proc(wt: World_Terrain, p: Placement, has_model: bool, x, y:
 		),
 		x, y, 16, col,
 	)
-	if !has_model do return
-	tilt := math.acos(clamp(p.transform.up.y, -1, 1)) * math.DEG_PER_RAD if p.align else 0
-	where_ := "" if p.on_terrain || p.snap == .Plane else "  (off the terrain: edge extended)"
+	act := editor.active(&p.ed)
+	if act == nil do return
+	tilt := math.acos(clamp(act.transform.up.y, -1, 1)) * math.DEG_PER_RAD if act.align else 0
+	where_ := "" if act.on_terrain || act.snap == .Plane else "  (off the terrain: edge extended)"
 	rl.DrawText(
 		fmt.ctprintf(
 			"[Z] snap %v  [U] align %s (tilt %.1f, max %.0f)  [Y/H] offset %+.2f m%s",
-			p.snap, "on" if p.align else "off", tilt, p.max_tilt * math.DEG_PER_RAD,
-			p.offset / max(p.world_scale, 1e-12), where_,
+			act.snap, "on" if act.align else "off", tilt, p.max_tilt * math.DEG_PER_RAD,
+			act.offset / max(p.world_scale, 1e-12), where_,
 		),
 		x, y + 20, 16, col,
 	)

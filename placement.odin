@@ -1,27 +1,48 @@
 package main
 
-// Placement: one GLB object, driven from the keyboard and the command line.
-// No mouse picking yet (Block 2).
+// Placement: GLB objects in the level, driven by the mouse, the keyboard and
+// the command line.
 //
-// Block 1 stood it on a horizontal ground plane: a single height, a first
-// guess from the cloud corrected by eye. Block 5 stands it on the terrain
-// proxy (terrain/terrain.odin) instead: the height under its footprint, and
-// with alignment on, the slope of the ground under it. The plane stays as a
-// snap mode, for clouds the terrain cannot be built from.
+// Block 1 stood one object on a horizontal ground plane. Block 5 stands it on
+// the terrain proxy (terrain/terrain.odin): the height under its footprint and,
+// with alignment on, the slope. Block 2 makes it a level: any number of
+// instances of any number of loaded GLBs, placed and picked with the mouse.
+// The state machine, the picking maths and the snapping are in editor/ (no
+// raylib, `odin test editor`); this file is the raylib side: input, assets,
+// drawing, overlay.
 //
-//   I J K L        move along the ground, relative to the view (shift: faster)
-//   Y H            plane: raise / lower the ground plane (the object stays on it)
+// Mouse
+//   move           Place / Move: the object follows the cursor over the terrain
+//   left-click     Place: put down a copy (and keep placing)
+//                  Move: put the object down
+//                  Select: select the object under the cursor, or deselect
+//   (a left-drag still turns the camera: a press only clicks if the cursor
+//    moved less than editor.CLICK_SLOP pixels)
+//
+// Keys
+//   A              place: copies of the selected object (or of the last one)
+//   W              move the selected object with the mouse
+//   Delete / Bksp  delete the selected object
+//   Esc            stop placing / undo the move / deselect
+//   O              next loaded model for the selected object or the preview
+//   drop a .glb    load it and start placing it
+//
+// The keyboard edits the preview while placing, otherwise the selection:
+//   I J K L        move along the ground, relative to the view (shift: faster).
+//                  Select mode only: in Place and Move the mouse moves it
+//   Y H            plane: raise / lower the object's plane
 //                  terrain: raise / lower the object above the terrain (offset)
 //   Z              snap: ground (DTM) / surface (DSM, roofs) / plane
 //   U              align the object to the slope under it / keep it upright
 //   , .            rotate 15 degrees left / right (shift: 90)
 //   N M            object scale down / up (shift: faster)
+//   T              back to the start transform (the command line's)
+//   F              print it as command-line flags (shift+F: every object)
+// Global:
 //   ctrl+N M       world scale down / up: calibrate the capture against a
 //                  known-size object (a car is ~4 m), then keep the value
-//   T              back to the start transform
-//   B              overlay: ground grid, bounds, pivot, +Z forward
-//   V              hide / show the object
-//   F              print the current transform as command-line flags
+//   B              overlay: ground grid, bounds of every object, pivot, +Z forward
+//   V              hide / show the objects
 
 import "core:fmt"
 import "core:math"
@@ -32,38 +53,31 @@ import "core:strings"
 
 import rl "vendor:raylib"
 
+import "editor"
 import "terrain"
 
-Transform :: struct {
-	position: [3]f32, // world position of the pivot (bottom centre of the bounds)
-	rotation: [3]f32, // Euler XYZ, radians. Upright objects only use .y
-	scale:    [3]f32, // object scale: 1 = the GLB's own size, in metres
-	up:       [3]f32, // the object's +Y after the rotation: the ground normal when
-	                  // aligned. {0, 1, 0} (or zero): upright
-}
+Transform :: editor.Transform
+Snap :: editor.Snap
+Instance :: editor.Instance
 
-// Where the object's height comes from.
-Snap :: enum {
-	Ground,  // terrain DTM: bare ground, under trees and between buildings
-	Surface, // terrain DSM: the top, so roofs and walls
-	Plane,   // a horizontal plane at `ground` (Block 1)
+Placement :: struct {
+	ed:          editor.Editor,
+	assets:      [dynamic]Model_Asset, // instances refer to these by index
+	world_scale: f32,                  // world units per metre, for every object
+	max_tilt:    f32,                  // radians
+	overlay:     bool,
+	visible:     bool,
+	start:       Instance, // the command line's placement: the first object, and T
+	template:    Instance, // what A places with nothing selected: the last placed
+	click:       editor.Click,
+	hover:       u64,    // Select: the object under the cursor, 0 if none
+	cursor:      [3]f32, // where the cursor meets the ground
+	cursor_ok:   bool,
 }
 
 // Splat captures are not in metres (Krakow: ~0.005 units per metre), GLBs are.
 // world_scale bridges the two, so objects keep scale 1 at real size and sizes
 // can be shown in metres.
-Placement :: struct {
-	transform:   Transform,
-	ground:      f32, // height of the placement plane; transform.position.y follows it
-	world_scale: f32, // world units per metre
-	overlay:     bool,
-	visible:     bool,
-	snap:        Snap,
-	offset:      f32,  // terrain snap: height above the terrain, world units
-	align:       bool, // terrain snap: tilt to the slope under the footprint
-	max_tilt:    f32,  // radians
-	on_terrain:  bool, // the pivot is over the terrain grid (else its edge is extended)
-}
 
 // Command line. The cloud is the first argument that is not a flag.
 //
@@ -245,8 +259,9 @@ ground_guess :: proc(pos: [][3]f32) -> f32 {
 	return tmp[int(f32(m - 1) * GROUND_PERCENTILE)]
 }
 
-// Start transform: the command line where given, otherwise the cloud centre on
-// the guessed ground.
+// A new level: empties it and, if a model is loaded, stands the first object
+// where the command line says, otherwise at the cloud centre on the guessed
+// ground, selected.
 placement_reset :: proc(p: ^Placement, o: Options, v: Splat_View) {
 	ground := ground_guess(v.pos)
 	if o.has_ground do ground = o.ground
@@ -255,132 +270,262 @@ placement_reset :: proc(p: ^Placement, o: Options, v: Splat_View) {
 		position = o.pos
 		ground = o.pos.y
 	}
-	p.ground = ground
 	p.world_scale = o.world_scale
-	p.transform = Transform{
-		position = position,
-		rotation = {0, o.yaw * math.RAD_PER_DEG, 0},
-		scale    = {o.scale, o.scale, o.scale},
-		up       = {0, 1, 0},
-	}
-	p.snap = o.snap
-	p.offset = o.offset
-	p.align = o.align
 	p.max_tilt = o.max_tilt * math.RAD_PER_DEG
-}
-
-snapped :: proc(p: Placement, has_terrain: bool) -> bool {
-	return p.snap != .Plane && has_terrain
-}
-
-snap_layer :: proc(s: Snap) -> terrain.Layer {
-	return .Surface if s == .Surface else .Ground
-}
-
-// Height (and with align, tilt) from the terrain under the footprint. Call
-// after placement_update, every frame: the object follows the terrain as it
-// moves. Without a terrain, or in plane mode, it stands on the plane.
-placement_settle :: proc(p: ^Placement, a: Model_Asset, ter: terrain.Terrain, has_terrain: bool) {
-	t := &p.transform
-	if !snapped(p^, has_terrain) {
-		t.position.y = p.ground
-		t.up = {0, 1, 0}
-		p.on_terrain = false
-		return
+	p.start = Instance{
+		asset     = 0,
+		transform = {
+			position = position,
+			rotation = {0, editor.wrap_yaw(o.yaw * math.RAD_PER_DEG), 0},
+			scale    = {o.scale, o.scale, o.scale},
+			up       = {0, 1, 0},
+		},
+		snap      = o.snap,
+		offset    = o.offset,
+		align     = o.align,
+		ground    = ground,
 	}
-	half := object_size_m(a, t^).xz * p.world_scale * 0.5
-	h, n, inside := terrain.fit_footprint(
-		ter, t.position.xz, half, t.rotation.y, snap_layer(p.snap),
-		p.max_tilt if p.align else 0,
-	)
-	t.position.y = h + p.offset
-	t.up = n if p.align else {0, 1, 0}
-	p.on_terrain = inside
-	p.ground = h // the plane follows, so switching to plane mode keeps the height
+	p.template = p.start
+	p.hover = 0
+	editor.reset(&p.ed)
+	if len(p.assets) > 0 {
+		p.ed.selected = editor.add(&p.ed, p.start)
+	}
+}
+
+placement_destroy :: proc(p: ^Placement) {
+	for &a in p.assets do release_model_asset(&a)
+	delete(p.assets)
+	editor.destroy(&p.ed)
+	p^ = {}
+}
+
+// Loads a GLB, or finds it already loaded: instances share their asset.
+placement_load_asset :: proc(p: ^Placement, path: string, shader: rl.Shader) -> (index: int, ok: bool) {
+	for a, i in p.assets {
+		if a.path == path do return i, true
+	}
+	a := load_model_asset(path, shader) or_return
+	append(&p.assets, a)
+	return len(p.assets) - 1, true
+}
+
+asset_of :: proc(p: ^Placement, inst: Instance) -> ^Model_Asset {
+	if inst.asset < 0 || inst.asset >= len(p.assets) do return nil
+	return &p.assets[inst.asset]
+}
+
+// Every loaded model's colours, for the extracted palette. Temp allocator.
+placement_colors :: proc(p: ^Placement) -> [][4]u8 {
+	if len(p.assets) == 1 do return p.assets[0].colors
+	out := make([dynamic][4]u8, context.temp_allocator)
+	for a in p.assets do append(&out, ..a.colors)
+	return out[:]
+}
+
+// Something to draw: an object in the level, or the preview.
+placement_has_objects :: proc(p: ^Placement) -> bool {
+	return len(p.ed.instances) > 0 || p.ed.mode == .Place
+}
+
+// Every object (and the preview) on the terrain under it. Every frame: they
+// follow the terrain as they move, and a world scale or terrain change.
+placement_settle :: proc(p: ^Placement, ter: terrain.Terrain, has_terrain: bool) {
+	for &inst in p.ed.instances {
+		a := asset_of(p, inst)
+		if a == nil do continue
+		editor.settle(&inst, object_size_m(a^, inst.transform), p.world_scale, p.max_tilt, ter, has_terrain)
+	}
+	if p.ed.mode == .Place {
+		if a := asset_of(p, p.ed.preview); a != nil {
+			editor.settle(&p.ed.preview, object_size_m(a^, p.ed.preview.transform), p.world_scale, p.max_tilt, ter, has_terrain)
+		}
+	}
+}
+
+// Model-space bounds, the pivot at the bottom centre.
+asset_bounds :: proc(a: Model_Asset) -> (lo, hi: [3]f32) {
+	lo = a.pivot - {a.size.x * 0.5, 0, a.size.z * 0.5}
+	hi = a.pivot + {a.size.x * 0.5, a.size.y, a.size.z * 0.5}
+	return
+}
+
+// How far behind the first surface the cursor meets an object may still be
+// picked, metres: a car under a low canopy or against a wall stays clickable,
+// one behind a building does not.
+PICK_OCCLUSION_M :: f32(2)
+
+placement_pick :: proc(p: ^Placement, ray: editor.Ray, t_surface: f32) -> u64 {
+	cands := make([dynamic]editor.Candidate, 0, len(p.ed.instances), context.temp_allocator)
+	for inst in p.ed.instances {
+		a := asset_of(p, inst)
+		if a == nil || a.model.meshCount <= 0 do continue
+		lo, hi := asset_bounds(a^)
+		append(&cands, editor.Candidate{id = inst.id, world = model_matrix(a^, inst.transform, p.world_scale), lo = lo, hi = hi})
+	}
+	max_t := max(f32)
+	if t_surface < max(f32) do max_t = t_surface + PICK_OCCLUSION_M * p.world_scale
+	id, _ := editor.pick(ray, cands[:], max_t)
+	return id
+}
+
+// The mouse, once a frame, after the camera has moved. ray: the cursor's ray
+// through the scene as drawn (see main), ray_ok false when the cursor is off
+// the picture.
+placement_mouse :: proc(
+	p: ^Placement, ray: editor.Ray, ray_ok: bool, mouse: [2]f32,
+	ter: terrain.Terrain, has_terrain: bool,
+) {
+	clicked := editor.click_update(&p.click, rl.IsMouseButtonDown(.LEFT), mouse)
+	p.cursor_ok = false
+	p.hover = 0
+	if !ray_ok || len(p.assets) == 0 do return
+
+	plane_y := p.start.ground
+	if act := editor.active(&p.ed); act != nil do plane_y = act.ground
+	cursor, t_surface, ok := editor.cursor_point(ray, ter, has_terrain, plane_y)
+	p.cursor, p.cursor_ok = cursor, ok
+
+	switch p.ed.mode {
+	case .Place, .Move:
+		act := editor.active(&p.ed)
+		if act != nil && ok do act.transform.position.xz = cursor.xz
+		if clicked && ok {
+			editor.commit(&p.ed)
+			if p.ed.mode == .Place do p.template = p.ed.preview
+		}
+	case .Select:
+		if p.visible do p.hover = placement_pick(p, ray, t_surface)
+		if clicked do editor.select(&p.ed, p.hover)
+	}
+}
+
+// Starts placing `template`, at the cursor if it is on the ground.
+placement_begin_place :: proc(p: ^Placement, template: Instance) {
+	t := template
+	if p.cursor_ok do t.transform.position.xz = p.cursor.xz
+	editor.begin_place(&p.ed, t)
 }
 
 ROTATE_STEP        :: f32(15)
 ROTATE_STEP_COARSE :: f32(90)
 
+// The keyboard, once a frame, before the mouse.
 // extent: the cloud's size, so movement speed scales with the capture.
 // has_terrain: Y/H move the offset above it rather than the plane.
-placement_update :: proc(p: ^Placement, camera: rl.Camera3D, extent: f32, dt: f32, has_terrain: bool) {
+placement_keys :: proc(p: ^Placement, camera: rl.Camera3D, extent: f32, dt: f32, has_terrain: bool) {
 	shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
-	speed := extent * 0.1 * dt * (f32(5) if shift else f32(1))
-
-	// view direction flattened onto the ground: I moves "up the screen"
-	f := camera.target - camera.position
-	f.y = 0
-	if linalg.vector_length(f) < 1e-6 {
-		f = {0, 0, -1}
-	}
-	f = linalg.normalize(f)
-	r := [3]f32{-f.z, 0, f.x}
-
-	move: [3]f32
-	if rl.IsKeyDown(.I) do move += f
-	if rl.IsKeyDown(.K) do move -= f
-	if rl.IsKeyDown(.L) do move += r
-	if rl.IsKeyDown(.J) do move -= r
-	p.transform.position += move * speed
-
-	// Y/H: the plane, or the height above the terrain (slower: it is a fine
-	// correction, a few centimetres for a car's tyres)
-	if snapped(p^, has_terrain) {
-		fine := speed * 0.1
-		if rl.IsKeyDown(.Y) do p.offset += fine
-		if rl.IsKeyDown(.H) do p.offset -= fine
-	} else {
-		if rl.IsKeyDown(.Y) do p.ground += speed
-		if rl.IsKeyDown(.H) do p.ground -= speed
-		p.transform.position.y = p.ground
-	}
-	if rl.IsKeyPressed(.Z) && !shift do p.snap = Snap((int(p.snap) + 1) % len(Snap))
-	if rl.IsKeyPressed(.U) do p.align = !p.align
-
-	step := (ROTATE_STEP_COARSE if shift else ROTATE_STEP) * math.RAD_PER_DEG
-	if rl.IsKeyPressed(.COMMA) do p.transform.rotation.y += step // counter-clockwise seen from above
-	if rl.IsKeyPressed(.PERIOD) do p.transform.rotation.y -= step
-	p.transform.rotation.y = math.mod(p.transform.rotation.y, 2 * math.PI)
-
-	// exponential, so a held key feels the same at any size: x2 per second.
-	// ctrl: the world scale instead, for calibrating a capture
-	rate := f32(math.LN2) * dt * (f32(4) if shift else f32(1))
 	ctrl := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
+
+	// ---- editor actions --------------------------------------------------
+	if rl.IsKeyPressed(.A) && len(p.assets) > 0 {
+		template := p.template
+		if sel := editor.selected(&p.ed); sel != nil do template = sel^
+		placement_begin_place(p, template)
+	}
+	if rl.IsKeyPressed(.W) do editor.begin_move(&p.ed)
+	if rl.IsKeyPressed(.DELETE) || rl.IsKeyPressed(.BACKSPACE) do editor.delete_selected(&p.ed)
+	if rl.IsKeyPressed(.ESCAPE) do editor.cancel(&p.ed)
+
+	// ---- global ------------------------------------------------------------
+	// exponential, so a held key feels the same at any size: x2 per second
+	rate := f32(math.LN2) * dt * (f32(4) if shift else f32(1))
 	factor: f32 = 1
 	if rl.IsKeyDown(.M) do factor = math.exp(rate)
 	if rl.IsKeyDown(.N) do factor = math.exp(-rate)
-	if ctrl {
-		p.world_scale *= factor
-	} else {
-		p.transform.scale *= factor
-	}
-
+	if ctrl do p.world_scale *= factor // calibrating the capture
 	if rl.IsKeyPressed(.B) do p.overlay = !p.overlay
 	if rl.IsKeyPressed(.V) do p.visible = !p.visible
-	if rl.IsKeyPressed(.F) do fmt.println(placement_flags(p^, context.temp_allocator))
+	if rl.IsKeyPressed(.F) && shift {
+		for inst in p.ed.instances {
+			fmt.printf("#%d %s\n", inst.id, instance_flags(p, inst, context.temp_allocator))
+		}
+	}
+
+	// ---- the active object: the preview, or the selection -------------------
+	act := editor.active(&p.ed)
+	if act == nil do return
+
+	if rl.IsKeyPressed(.O) && len(p.assets) > 1 do act.asset = (act.asset + 1) % len(p.assets)
+
+	speed := extent * 0.1 * dt * (f32(5) if shift else f32(1))
+	if p.ed.mode == .Select { // in Place and Move the mouse moves it
+		// view direction flattened onto the ground: I moves "up the screen"
+		f := camera.target - camera.position
+		f.y = 0
+		if linalg.vector_length(f) < 1e-6 do f = {0, 0, -1}
+		f = linalg.normalize(f)
+		r := [3]f32{-f.z, 0, f.x}
+		move: [3]f32
+		if rl.IsKeyDown(.I) do move += f
+		if rl.IsKeyDown(.K) do move -= f
+		if rl.IsKeyDown(.L) do move += r
+		if rl.IsKeyDown(.J) do move -= r
+		act.transform.position += move * speed
+	}
+
+	// Y/H: the plane, or the height above the terrain (slower: it is a fine
+	// correction, a few centimetres for a car's tyres)
+	if editor.snapped(act^, has_terrain) {
+		fine := speed * 0.1
+		if rl.IsKeyDown(.Y) do act.offset += fine
+		if rl.IsKeyDown(.H) do act.offset -= fine
+	} else {
+		if rl.IsKeyDown(.Y) do act.ground += speed
+		if rl.IsKeyDown(.H) do act.ground -= speed
+		act.transform.position.y = act.ground
+	}
+	if rl.IsKeyPressed(.Z) && !shift do act.snap = Snap((int(act.snap) + 1) % len(Snap))
+	if rl.IsKeyPressed(.U) do act.align = !act.align
+
+	step := (ROTATE_STEP_COARSE if shift else ROTATE_STEP) * math.RAD_PER_DEG
+	if rl.IsKeyPressed(.COMMA) do act.transform.rotation.y += step // counter-clockwise seen from above
+	if rl.IsKeyPressed(.PERIOD) do act.transform.rotation.y -= step
+	act.transform.rotation.y = editor.wrap_yaw(act.transform.rotation.y)
+
+	if !ctrl do act.transform.scale *= factor
+
+	if rl.IsKeyPressed(.T) {
+		// the start transform and snap settings; the model stays
+		s := p.start
+		act.transform, act.snap, act.offset, act.align, act.ground = s.transform, s.snap, s.offset, s.align, s.ground
+	}
+	if rl.IsKeyPressed(.F) && !shift do fmt.println(instance_flags(p, act^, context.temp_allocator))
 }
 
-placement_flags :: proc(p: Placement, allocator := context.allocator) -> string {
-	t := p.transform
-	yaw := t.rotation.y * math.DEG_PER_RAD
-	if yaw < 0 do yaw += 360
+// An object as the command-line flags that reproduce it.
+instance_flags :: proc(p: ^Placement, inst: Instance, allocator := context.allocator) -> string {
+	t := inst.transform
+	yaw := editor.wrap_yaw(t.rotation.y) * math.DEG_PER_RAD
 	f := world_fmt(p.world_scale)
 	snap := " --snap plane"
-	if p.snap != .Plane {
+	if inst.snap != .Plane {
 		snap = fmt.tprintf(
 			" --snap %s --offset %s%s --max-tilt %.0f",
-			"ground" if p.snap == .Ground else "surface",
-			fmt.tprintf(f, p.offset), " --align" if p.align else "", p.max_tilt * math.DEG_PER_RAD,
+			"ground" if inst.snap == .Ground else "surface",
+			fmt.tprintf(f, inst.offset), " --align" if inst.align else "", p.max_tilt * math.DEG_PER_RAD,
 		)
 	}
+	model := ""
+	if a := asset_of(p, inst); a != nil do model = fmt.tprintf("--model %s ", a.path)
 	return fmt.aprintf(
-		"--world-scale %.6f --pos %s,%s,%s --yaw %.1f --scale %.3f%s",
-		p.world_scale,
+		"%s--world-scale %.6f --pos %s,%s,%s --yaw %.1f --scale %.3f%s",
+		model, p.world_scale,
 		fmt.tprintf(f, t.position.x), fmt.tprintf(f, t.position.y), fmt.tprintf(f, t.position.z),
 		yaw, t.scale.x, snap,
 		allocator = allocator,
 	)
+}
+
+// Every object, and the preview, into the scene pass (see main).
+placement_draw :: proc(p: ^Placement) {
+	if !p.visible do return
+	for inst in p.ed.instances {
+		if a := asset_of(p, inst); a != nil do model_draw(a^, inst.transform, p.world_scale)
+	}
+	if p.ed.mode == .Place {
+		if a := asset_of(p, p.ed.preview); a != nil do model_draw(a^, p.ed.preview.transform, p.world_scale)
+	}
 }
 
 // Format for world-unit values that resolves about a centimetre: Krakow at
@@ -415,12 +560,19 @@ grid_cell_m :: proc(half_m: f32) -> f32 {
 // Editor overlay, drawn at screen resolution on top of the upscaled art so it
 // stays crisp and is never palette-snapped. Points are projected with the same
 // view/projection the scene pass used, so they line up with what was rendered.
+//
+// Always: the selection's bounds, the preview's (or the object being moved),
+// and the object under the cursor. With B: every object's bounds, and the
+// ground grid, pivot and +Z of the active one.
 // ---------------------------------------------------------------------------
 
-OVERLAY_GRID   :: rl.Color{120, 200, 255, 90}
-OVERLAY_BOUNDS :: rl.Color{255, 220, 90, 200}
-OVERLAY_PIVOT  :: rl.Color{255, 90, 90, 255}
-OVERLAY_FRONT  :: rl.Color{120, 255, 140, 255}
+OVERLAY_GRID     :: rl.Color{120, 200, 255, 90}
+OVERLAY_BOUNDS   :: rl.Color{255, 220, 90, 90}   // other objects, with B
+OVERLAY_SELECTED :: rl.Color{255, 220, 90, 255}
+OVERLAY_PREVIEW  :: rl.Color{110, 230, 255, 255} // placing, or moving
+OVERLAY_HOVER    :: rl.Color{255, 255, 255, 200}
+OVERLAY_PIVOT    :: rl.Color{255, 90, 90, 255}
+OVERLAY_FRONT    :: rl.Color{120, 255, 140, 255}
 
 project_point :: proc(vp: rl.Matrix, w, h: f32, q: [3]f32) -> (rl.Vector2, bool) {
 	c := vp * [4]f32{q.x, q.y, q.z, 1}
@@ -457,44 +609,16 @@ overlay_ground_line :: proc(
 	}
 }
 
-// w, h: size of the drawn picture in screen pixels (art size * pixel size)
-draw_placement_overlay :: proc(
-	a: Model_Asset, p: Placement, view_m, proj_m: rl.Matrix, w, h: f32,
-	ter: terrain.Terrain, has_terrain: bool,
-) {
-	vp := proj_m * view_m
-	t := p.transform
-	g := p.ground
-	drape := snapped(p, has_terrain)
-	layer := snap_layer(p.snap)
+to_world :: proc(m: rl.Matrix, q: [3]f32) -> [3]f32 {
+	r := m * [4]f32{q.x, q.y, q.z, 1}
+	return r.xyz
+}
 
-	// ground grid around the object in whole metres (grid_cell_m), so the
-	// world scale can be checked against the object at a glance
-	size_m := object_size_m(a, t)
-	foot_m := max(size_m.x, size_m.z)
-	if foot_m <= 0 do foot_m = 1
-	cell_m := grid_cell_m(foot_m * 2)
-	n := int(math.ceil(foot_m * 2 / cell_m))
-	cell := cell_m * p.world_scale
-	half := f32(n) * cell
-	c := t.position
-	for k in -n ..= n {
-		o := f32(k) * cell
-		overlay_ground_line(vp, w, h, {c.x - half, c.z + o}, {c.x + half, c.z + o}, g, ter, layer, drape, OVERLAY_GRID)
-		overlay_ground_line(vp, w, h, {c.x + o, c.z - half}, {c.x + o, c.z + half}, g, ter, layer, drape, OVERLAY_GRID)
-	}
-
+// The model-space bounds, through the full object transform.
+overlay_bounds :: proc(a: Model_Asset, t: Transform, world_scale: f32, vp: rl.Matrix, w, h: f32, col: rl.Color, thick: f32) {
 	if a.model.meshCount <= 0 do return
-	foot := foot_m * p.world_scale
-	world := model_matrix(a, t, p.world_scale)
-	to_world :: proc(m: rl.Matrix, q: [3]f32) -> [3]f32 {
-		r := m * [4]f32{q.x, q.y, q.z, 1}
-		return r.xyz
-	}
-
-	// model-space bounds, through the full object transform
-	lo := a.pivot - {a.size.x * 0.5, 0, a.size.z * 0.5}
-	hi := a.pivot + {a.size.x * 0.5, a.size.y, a.size.z * 0.5}
+	world := model_matrix(a, t, world_scale)
+	lo, hi := asset_bounds(a)
 	corners: [8][3]f32
 	for k in 0 ..< 8 {
 		q := [3]f32{
@@ -511,11 +635,38 @@ draw_placement_overlay :: proc(
 	}
 	edges := EDGES
 	for e in edges {
-		overlay_line(vp, w, h, corners[e[0]], corners[e[1]], OVERLAY_BOUNDS)
+		overlay_line(vp, w, h, corners[e[0]], corners[e[1]], col, thick)
+	}
+}
+
+// Ground grid around the object in whole metres (grid_cell_m), so the world
+// scale can be checked against the object at a glance; its pivot cross and the
+// model's +Z as its "front".
+overlay_details :: proc(
+	a: Model_Asset, inst: Instance, world_scale: f32, vp: rl.Matrix, w, h: f32,
+	ter: terrain.Terrain, has_terrain: bool,
+) {
+	t := inst.transform
+	drape := editor.snapped(inst, has_terrain)
+	layer := editor.snap_layer(inst.snap)
+	size_m := object_size_m(a, t)
+	foot_m := max(size_m.x, size_m.z)
+	if foot_m <= 0 do foot_m = 1
+	cell_m := grid_cell_m(foot_m * 2)
+	n := int(math.ceil(foot_m * 2 / cell_m))
+	cell := cell_m * world_scale
+	half := f32(n) * cell
+	c := t.position
+	for k in -n ..= n {
+		o := f32(k) * cell
+		overlay_ground_line(vp, w, h, {c.x - half, c.z + o}, {c.x + half, c.z + o}, inst.ground, ter, layer, drape, OVERLAY_GRID)
+		overlay_ground_line(vp, w, h, {c.x + o, c.z - half}, {c.x + o, c.z + half}, inst.ground, ter, layer, drape, OVERLAY_GRID)
 	}
 
-	// pivot cross in the object's base plane, and the model's +Z as its "front"
-	arm := foot * 0.15 / max(t.scale.x * p.world_scale, 1e-12) // model units
+	if a.model.meshCount <= 0 do return
+	foot := foot_m * world_scale
+	world := model_matrix(a, t, world_scale)
+	arm := foot * 0.15 / max(t.scale.x * world_scale, 1e-12) // model units
 	pv := a.pivot
 	overlay_line(vp, w, h, to_world(world, pv - {arm, 0, 0}), to_world(world, pv + {arm, 0, 0}), OVERLAY_PIVOT, 2)
 	overlay_line(vp, w, h, to_world(world, pv - {0, 0, arm}), to_world(world, pv + {0, 0, arm}), OVERLAY_PIVOT, 2)
@@ -523,5 +674,37 @@ draw_placement_overlay :: proc(
 	overlay_line(vp, w, h, c, front, OVERLAY_FRONT, 2)
 	if tip, ok := project_point(vp, w, h, front); ok {
 		rl.DrawText("+Z", i32(tip.x) + 4, i32(tip.y) - 8, 16, OVERLAY_FRONT)
+	}
+}
+
+// w, h: size of the drawn picture in screen pixels (art size * pixel size)
+draw_placement_overlay :: proc(
+	p: ^Placement, view_m, proj_m: rl.Matrix, w, h: f32,
+	ter: terrain.Terrain, has_terrain: bool,
+) {
+	if !p.visible do return
+	vp := proj_m * view_m
+	moving := p.ed.mode == .Move
+	for inst in p.ed.instances {
+		a := asset_of(p, inst)
+		if a == nil do continue
+		switch {
+		case inst.id == p.ed.selected:
+			overlay_bounds(a^, inst.transform, p.world_scale, vp, w, h, OVERLAY_PREVIEW if moving else OVERLAY_SELECTED, 2)
+		case inst.id == p.hover:
+			overlay_bounds(a^, inst.transform, p.world_scale, vp, w, h, OVERLAY_HOVER, 1)
+		case p.overlay:
+			overlay_bounds(a^, inst.transform, p.world_scale, vp, w, h, OVERLAY_BOUNDS, 1)
+		}
+	}
+	if p.ed.mode == .Place {
+		if a := asset_of(p, p.ed.preview); a != nil {
+			overlay_bounds(a^, p.ed.preview.transform, p.world_scale, vp, w, h, OVERLAY_PREVIEW, 2)
+		}
+	}
+	if p.overlay {
+		if act := editor.active(&p.ed); act != nil {
+			if a := asset_of(p, act^); a != nil do overlay_details(a^, act^, p.world_scale, vp, w, h, ter, has_terrain)
+		}
 	}
 }
