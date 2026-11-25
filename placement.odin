@@ -84,7 +84,8 @@ Placement :: struct {
 //   odin run . -- ../ospz/models/krakow.spz --model assets/models/car/volkswagen_typ-82.glb
 //                 [--world-scale u] [--pos x,y,z] [--yaw degrees] [--scale s] [--ground y]
 //                 [--snap ground|surface|plane] [--offset y] [--align] [--max-tilt degrees]
-//                 [--cell metres] [--terrain-export prefix]
+//                 [--cell metres] [--terrain-export prefix] [--level file.json]
+//   odin run . -- levels/krakow.json    (a level: its capture, models and objects)
 //
 // --world-scale is world units per metre (default 1). --pos sets the ground
 // plane to its y (snapping to the terrain ignores that y). --ground alone keeps
@@ -105,6 +106,8 @@ Options :: struct {
 	max_tilt:    f32, // degrees
 	cell_m:      f32, // terrain cell, metres; 0 = automatic
 	export:      string,
+	level:       string, // level file: opened if it exists, saved to (ctrl+S)
+	level_arg:   bool,   // the level was the positional argument: it must exist
 }
 
 DEFAULT_MAX_TILT :: f32(20) // degrees; steeper than any street, flatter than a kerb edge
@@ -120,7 +123,9 @@ parse_options :: proc(args: []string) -> (o: Options, ok: bool) {
 		arg := args[i]
 		i += 1
 		if !strings.has_prefix(arg, "--") {
-			if len(o.cloud) == 0 {
+			if strings.has_suffix(strings.to_lower(arg, context.temp_allocator), ".json") && len(o.level) == 0 {
+				o.level, o.level_arg = arg, true
+			} else if len(o.cloud) == 0 {
 				o.cloud = arg
 			} else {
 				fmt.eprintf("unexpected argument %q\n", arg)
@@ -217,6 +222,8 @@ parse_options :: proc(args: []string) -> (o: Options, ok: bool) {
 			}
 		case "--terrain-export":
 			o.export = value
+		case "--level":
+			o.level = value
 		case "--pos":
 			parts := strings.split(value, ",", context.temp_allocator)
 			good := len(parts) == 3
@@ -302,8 +309,15 @@ placement_destroy :: proc(p: ^Placement) {
 
 // Loads a GLB, or finds it already loaded: instances share their asset.
 placement_load_asset :: proc(p: ^Placement, path: string, shader: rl.Shader) -> (index: int, ok: bool) {
-	for a, i in p.assets {
-		if a.path == path do return i, true
+	for &a, i in p.assets {
+		if a.path != path do continue
+		if !a.missing do return i, true
+		// a level's model that was missing: try again, in its place, so the
+		// objects that use it get it
+		m := load_model_asset(path, shader) or_return
+		release_model_asset(&a)
+		a = m
+		return i, true
 	}
 	a := load_model_asset(path, shader) or_return
 	append(&p.assets, a)

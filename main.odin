@@ -30,11 +30,13 @@ import "core:fmt"
 import "core:math"
 import "core:math/linalg"
 import "core:os"
+import "core:strings"
 
 import rl "vendor:raylib"
 import rlgl "vendor:raylib/rlgl"
 
 import "editor"
+import "scene"
 
 BACKGROUND :: [4]u8{16, 14, 20, 255}
 
@@ -77,11 +79,33 @@ main :: proc() {
 	if !opts_ok {
 		fmt.eprintln(
 			"usage: sandtable <cloud.spz|.ply> [--model file.glb] [--world-scale u] [--pos x,y,z] [--yaw deg] [--scale s] [--ground y]\n" +
-			"                 [--snap ground|surface|plane] [--offset y] [--align] [--max-tilt deg] [--cell m] [--terrain-export prefix]",
+			"                 [--snap ground|surface|plane] [--offset y] [--align] [--max-tilt deg] [--cell m] [--terrain-export prefix]\n" +
+			"                 [--level file.json]\n" +
+			"       sandtable <level.json> [--model file.glb]",
 		)
 		return
 	}
-	path := opts.cloud if len(opts.cloud) > 0 else "tree.ply"
+	// a level: its capture, unless one is given, and its scale and terrain cell,
+	// so the terrain is built once, as the level was made. A level that exists
+	// but cannot be read stops here: nothing may be saved over it.
+	if opts.level_arg && !os.exists(opts.level) {
+		fmt.eprintf("level %s: no such file\n", opts.level)
+		return
+	}
+	open_at_start := len(opts.level) > 0 && os.exists(opts.level)
+	cloud_given := len(opts.cloud) > 0
+	if open_at_start {
+		l, ok := level_read(opts.level)
+		if !ok do return
+		if !cloud_given do opts.cloud = scene.resolve(opts.level, l.terrain)
+		opts.world_scale = l.world_scale
+		opts.cell_m = l.terrain_cell
+		opts.max_tilt = l.max_tilt
+		scene.destroy(&l)
+	}
+	cloud_path := strings.clone(opts.cloud if len(opts.cloud) > 0 else "tree.ply")
+	defer delete(cloud_path)
+	path := cloud_path
 
 	view, load_err := load_view(path)
 	defer release_view(&view)
@@ -139,6 +163,24 @@ main :: proc() {
 	free_cam: rl.Camera3D
 	iso: Iso
 	frame_views(&free_cam, &iso, view)
+
+	lv: Level_State
+	defer level_destroy(&lv)
+	if !open_at_start { // open_level sets it
+		level_set_path(&lv, opts.level if len(opts.level) > 0 else scene.default_level_path(cloud_path, context.temp_allocator))
+	}
+	missing := 0
+	if open_at_start {
+		m, ok := open_level(opts.level, &view, &cloud_path, &free_cam, &iso, &placement, &ground_proxy, &lv, model_shader.shader, keep_cloud = cloud_given)
+		if !ok do return
+		missing = m
+		// --model with a level: the model A places
+		if len(opts.model) > 0 {
+			if idx, found := placement_load_asset(&placement, opts.model, model_shader.shader); found && len(placement.ed.instances) == 0 {
+				placement.template.asset = idx
+			}
+		}
+	}
 	apply_palette(&post, palette_mode, view, placement_colors(&placement))
 
 	last_fwd: [3]f32
@@ -150,7 +192,14 @@ main :: proc() {
 			files := rl.LoadDroppedFiles()
 			if files.count > 0 {
 				p := string(files.paths[0])
-				if is_model_path(p) {
+				if strings.has_suffix(strings.to_lower(p, context.temp_allocator), ".json") {
+					if m, ok := open_level(p, &view, &cloud_path, &free_cam, &iso, &placement, &ground_proxy, &lv, model_shader.shader); ok {
+						missing = m
+						load_err = .None
+						last_fwd = {}
+						apply_palette(&post, palette_mode, view, placement_colors(&placement))
+					}
+				} else if is_model_path(p) {
 					// load it (once) and start placing it
 					if idx, ok := placement_load_asset(&placement, p, model_shader.shader); ok {
 						template := placement.template
@@ -167,8 +216,12 @@ main :: proc() {
 						release_view(&view)
 						view = next
 						load_err = .None
+						delete(cloud_path)
+						cloud_path = strings.clone(p)
 						frame_views(&free_cam, &iso, view)
 						placement_reset(&placement, opts, view)
+						level_new(&lv, cloud_path)
+						missing = 0
 						world_terrain_build(&ground_proxy, view, placement.world_scale, model_shader.shader)
 						apply_palette(&post, palette_mode, view, placement_colors(&placement))
 						last_fwd = {}
@@ -181,9 +234,29 @@ main :: proc() {
 			rl.UnloadDroppedFiles(files)
 		}
 
-		if rl.IsKeyPressed(.R) {
+		cmd := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL) || rl.IsKeyDown(.LEFT_SUPER) || rl.IsKeyDown(.RIGHT_SUPER)
+		if rl.IsKeyPressed(.R) && !cmd {
 			frame_views(&free_cam, &iso, view)
 			last_fwd = {}
+		}
+		// ---- level -----------------------------------------------------------
+		if cmd && rl.IsKeyPressed(.S) {
+			level_save(&lv, &placement, cloud_path, ground_proxy.cell_m, iso)
+		}
+		if cmd && rl.IsKeyPressed(.R) {
+			switch {
+			case !os.exists(lv.path):
+				level_say(&lv, true, "%s: nothing saved yet", lv.path)
+			case level_dirty(&lv, &placement, cloud_path, ground_proxy.cell_m) && !level_confirmed(&lv, .Discard):
+				level_say(&lv, true, "unsaved changes: ctrl+R again to drop them and reload %s", lv.path)
+			case:
+				reload := strings.clone(lv.path, context.temp_allocator)
+				if m, ok := open_level(reload, &view, &cloud_path, &free_cam, &iso, &placement, &ground_proxy, &lv, model_shader.shader); ok {
+					missing = m
+					last_fwd = {}
+					apply_palette(&post, palette_mode, view, placement_colors(&placement))
+				}
+			}
 		}
 		if rl.IsKeyPressed(.C) {
 			game_cam = !game_cam
@@ -206,7 +279,7 @@ main :: proc() {
 		if rl.IsKeyPressed(.Q) do cfg.quant = !cfg.quant
 		if rl.IsKeyPressed(.X) do cfg.crisp = !cfg.crisp
 		if rl.IsKeyPressed(.E) do cfg.outline = !cfg.outline
-		if rl.IsKeyPressed(.S) do cfg.ss = 3 - cfg.ss // 1 <-> 2
+		if rl.IsKeyPressed(.S) && !cmd do cfg.ss = 3 - cfg.ss // 1 <-> 2
 		if rl.IsKeyPressed(.D) do cfg.dither = 0 if cfg.dither >= 1 else cfg.dither + 0.5
 		if rl.IsKeyPressed(.G) do grade_strength = 1 if grade_strength <= 0 else grade_strength - 0.5 // 1 -> 0.5 -> 0
 		// The extracted palette is built from the ungraded cloud, so the grade only
@@ -259,6 +332,12 @@ main :: proc() {
 		ray, ray_ok := editor.screen_ray(linalg.inverse(proj_m * view_m), editor.ndc_from_screen(mouse, pic_w, pic_h))
 		placement_mouse(&placement, ray, ray_ok && on_picture, mouse, ground_proxy.t, ground_proxy.ok)
 		placement_settle(&placement, ground_proxy.t, ground_proxy.ok)
+		if lv.baseline { // just opened: what "saved" looks like, once settled
+			delete(lv.saved)
+			lv.saved = strings.clone(level_text(&lv, &placement, cloud_path, ground_proxy.cell_m, nil))
+			lv.baseline = false
+		}
+		dirty := level_dirty(&lv, &placement, cloud_path, ground_proxy.cell_m)
 
 		fwd := linalg.normalize(camera.target - camera.position)
 		if view.count > 0 &&
@@ -342,9 +421,13 @@ main :: proc() {
 		px_per_unit := f32(targets.h) / camera.fovy if game_cam else 0
 		draw_model_hud(&placement, model_err, px_per_unit, 10, 98)
 		draw_terrain_hud(ground_proxy, &placement, 10, 178)
+		draw_level_hud(&lv, dirty, missing, 10, 218)
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 	}
+
+	// closing with unsaved changes: keep them next to the level
+	level_autosave(&lv, &placement, cloud_path, ground_proxy.cell_m, iso)
 }
 
 // px_per_unit: art pixels per world unit in the game camera, 0 in the free one
