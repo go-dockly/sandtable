@@ -10,7 +10,7 @@
 - **Fixed coordinates.** The game region is saved in the level, so adding a car later doesn't shift anything. By default it's the whole terrain. Edit `origin` and `size` under `game` in the level to cut out a smaller map.
 - **The HUD shows the cursor in game coordinates**, so you can read off spawn and patrol points to type into the base file.
 
-**To play it:** apply `commandos-mission-path.patch` to commandos (it lets the game take a mission path), then:
+**To play it** (commandos takes the mission as its argument):
 
 ```
 cd ../commandos

@@ -417,3 +417,115 @@ yaw_wraps :: proc(t: ^testing.T) {
 	testing.expect(t, abs(wrap_yaw(5 * math.PI) - math.PI) < 1e-5)
 	testing.expect(t, wrap_yaw(0) == 0)
 }
+
+// ---------------------------------------------------------------------------
+// Undo / redo
+// ---------------------------------------------------------------------------
+
+xs :: proc(e: ^Editor) -> [dynamic]f32 {
+	out := make([dynamic]f32, context.temp_allocator)
+	for inst in e.instances do append(&out, inst.transform.position.x)
+	return out
+}
+
+@(test)
+undo_stamps_and_redo_them :: proc(t: ^testing.T) {
+	e: Editor
+	defer destroy(&e)
+	testing.expect(t, !undo(&e) && !redo(&e), "nothing yet")
+	begin_place(&e, at(0, 0))
+	for i in 0 ..< 3 {
+		e.preview.transform.position.x = f32(i + 1)
+		commit(&e)
+	}
+	testing.expect(t, can_undo(&e) == 3)
+	testing.expect(t, undo(&e) && len(e.instances) == 2)
+	testing.expect(t, e.mode == .Place, "still placing")
+	testing.expect(t, undo(&e) && undo(&e) && len(e.instances) == 0)
+	testing.expect(t, !undo(&e))
+	testing.expect(t, redo(&e) && redo(&e))
+	got := xs(&e)
+	testing.expectf(t, len(got) == 2 && got[0] == 1 && got[1] == 2, "%v", got)
+	testing.expect(t, e.instances[1].id == 2, "the same ids come back")
+
+	// a new change drops what was undone; ids are not handed out again
+	e.preview.transform.position.x = 9
+	id := commit(&e)
+	testing.expectf(t, id == 4, "id %v: 3 was used, even if undone", id)
+	testing.expect(t, can_redo(&e) == 0)
+}
+
+@(test)
+undo_a_delete_and_a_move :: proc(t: ^testing.T) {
+	e: Editor
+	defer destroy(&e)
+	a := add(&e, at(1, 1))
+	b := add(&e, at(2, 2))
+	select(&e, a)
+	delete_selected(&e)
+	testing.expect(t, len(e.instances) == 1)
+	testing.expect(t, undo(&e))
+	testing.expect(t, len(e.instances) == 2 && e.instances[0].id == a && e.instances[1].id == b, "back, in its place")
+	testing.expect(t, e.selected == a, "and selected again")
+
+	// a move: one step, back to where it was picked up
+	begin_move(&e)
+	for k in 0 ..< 30 do active(&e).transform.position.x = f32(k) // the mouse, frame by frame
+	commit(&e)
+	inst, _ := find(&e, a)
+	testing.expect(t, inst.transform.position.x == 29)
+	testing.expect(t, undo(&e))
+	inst, _ = find(&e, a)
+	testing.expectf(t, inst.transform.position.x == 1, "x %v", inst.transform.position.x)
+	testing.expect(t, redo(&e))
+	inst, _ = find(&e, a)
+	testing.expect(t, inst.transform.position.x == 29)
+
+	// a cancelled move is no step; undo while moving is Esc
+	n := can_undo(&e)
+	begin_move(&e)
+	active(&e).transform.position.x = 50
+	cancel(&e)
+	testing.expect(t, can_undo(&e) == n)
+	begin_move(&e)
+	active(&e).transform.position.x = 50
+	testing.expect(t, undo(&e) && e.mode == .Select)
+	inst, _ = find(&e, a)
+	testing.expect(t, inst.transform.position.x == 29 && can_undo(&e) == n)
+
+	// deleting mid-move: undo brings it back where it was picked up
+	begin_move(&e)
+	active(&e).transform.position.x = 70
+	delete_selected(&e)
+	testing.expect(t, undo(&e))
+	inst, _ = find(&e, a)
+	testing.expect(t, inst != nil && inst.transform.position.x == 29)
+}
+
+@(test)
+keyboard_edits_and_limits :: proc(t: ^testing.T) {
+	e: Editor
+	defer destroy(&e)
+	id := add(&e, at(0, 0))
+	select(&e, id)
+	// a held key: one checkpoint at the press, many frames of change
+	checkpoint(&e)
+	for _ in 0 ..< 60 do selected(&e).transform.rotation.y += 0.01
+	checkpoint(&e) // the next press
+	checkpoint(&e) // a press that changed nothing: no step
+	testing.expect(t, can_undo(&e) == 2)
+	undo(&e)
+	undo(&e)
+	testing.expect(t, selected(&e).transform.rotation.y == 0)
+
+	for i in 0 ..< HISTORY_MAX + 20 {
+		checkpoint(&e)
+		selected(&e).transform.position.x = f32(i + 1)
+	}
+	testing.expect(t, can_undo(&e) == HISTORY_MAX, "the oldest steps go")
+	for undo(&e) {}
+	testing.expectf(t, selected(&e).transform.position.x == 20, "x %v: the 20 oldest are gone", selected(&e).transform.position.x)
+
+	reset(&e)
+	testing.expect(t, can_undo(&e) == 0 && can_redo(&e) == 0, "a new level, a new history")
+}

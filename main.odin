@@ -274,7 +274,7 @@ main :: proc() {
 			apply_palette(&post, palette_mode, view, placement_colors(&placement))
 		}
 		shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
-		if rl.IsKeyPressed(.Z) && shift {
+		if rl.IsKeyPressed(.Z) && shift && !cmd {
 			world_terrain_build(&ground_proxy, view, placement.world_scale, model_shader.shader)
 		}
 		if rl.IsKeyPressed(.TAB) do ground_proxy.view = Terrain_View((int(ground_proxy.view) + 1) % len(Terrain_View))
@@ -465,7 +465,8 @@ draw_model_hud :: proc(p: ^Placement, err: string, px_per_unit: f32, x, y: i32) 
 		hover := fmt.tprintf(" | under the cursor: #%d", p.hover) if p.hover != 0 && p.hover != ed.selected else ""
 		mode = fmt.tprintf("SELECT | %d object%s, %s%s", n, plural, sel, hover)
 	}
-	rl.DrawText(fmt.ctprintf("%s%s", mode, "" if p.visible else " | hidden"), x, y, 16, {140, 220, 255, 255})
+	history := fmt.tprintf(" | [ctrl+Z] undo %d  [ctrl+shift+Z] redo %d", editor.can_undo(ed), editor.can_redo(ed))
+	rl.DrawText(fmt.ctprintf("%s%s%s", mode, "" if p.visible else " | hidden", history), x, y, 16, {140, 220, 255, 255})
 
 	act := editor.active(ed)
 	a: ^Model_Asset

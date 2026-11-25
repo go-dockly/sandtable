@@ -1,0 +1,57 @@
+# The parts of sandtable that need no window or GPU: the terrain proxy, the
+# editor, the level format and the Commandos export, the export also through
+# commandos' own loader, collision and A*.
+#
+# The app itself (main package) also needs the ospz and ozstd checkouts and
+# raylib; it is not built here.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: sandtable
+
+      - uses: actions/checkout@v4
+        with:
+          repository: algo-boyz/commandos
+          path: commandos
+
+      - uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release: latest
+
+      - name: odin version
+        run: odin version
+
+      - name: vet
+        working-directory: sandtable
+        run: |
+          odin check terrain -no-entry-point -vet -strict-style
+          odin check editor -no-entry-point -vet -strict-style
+          odin check scene -no-entry-point -vet -strict-style
+
+      - name: terrain
+        working-directory: sandtable
+        run: odin test terrain
+
+      - name: editor
+        working-directory: sandtable
+        run: odin test editor
+
+      - name: scene
+        working-directory: sandtable
+        run: odin test scene
+
+      - name: export against commandos
+        working-directory: sandtable
+        run: odin run tools/commandos_check -collection:cmd=../commandos -collection:st=.
