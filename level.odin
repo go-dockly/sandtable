@@ -10,6 +10,7 @@ package main
 //
 //   ctrl+S (cmd+S)   save
 //   ctrl+R (cmd+R)   reload from disk, dropping unsaved changes
+//   ctrl+E (cmd+E)   export the Commandos mission (scene/game.odin)
 //   drop a .json     open that level
 //
 // Never loses work by accident: a level that exists but was not opened is
@@ -17,6 +18,7 @@ package main
 // second ctrl+R, and closing the window with unsaved changes writes them to
 // <level>.autosave.json, next to the level.
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:math"
 import "core:os"
@@ -32,6 +34,7 @@ Level_State :: struct {
 	saved:     string, // the level as last loaded / saved, without the view; owned. "" none
 	ours:      bool,   // path was opened or written here (or does not exist): ctrl+S may write it
 	id, title: string, // owned
+	game:      Maybe(scene.Game), // the Commandos export; its strings owned
 	confirm:   enum { None, Overwrite, Discard }, // waiting for the second press (CONFIRM_S)
 	confirm_at: time.Time,
 	baseline:  bool, // just loaded: take `saved` after the objects have settled
@@ -46,7 +49,22 @@ level_destroy :: proc(lv: ^Level_State) {
 	delete(lv.saved)
 	delete(lv.id)
 	delete(lv.title)
+	level_set_game(lv, nil)
 	lv^ = {}
+}
+
+// Replaces the game section (a copy is kept).
+level_set_game :: proc(lv: ^Level_State, g: Maybe(scene.Game)) {
+	if old, ok := lv.game.?; ok {
+		delete(old.mission)
+		delete(old.base)
+	}
+	lv.game = nil
+	if n, ok := g.?; ok {
+		n.mission = strings.clone(n.mission)
+		n.base = strings.clone(n.base)
+		lv.game = n
+	}
 }
 
 level_say :: proc(lv: ^Level_State, bad: bool, format: string, args: ..any) {
@@ -124,6 +142,7 @@ level_text :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, cell_m: 
 		terrain_cell = cell_m,
 		max_tilt     = p.max_tilt,
 		view         = view,
+		game         = lv.game,
 	}
 	l := scene.build(&p.ed, paths, h)
 	return scene.encode(l)
@@ -234,12 +253,14 @@ placement_add_placeholder :: proc(p: ^Placement, path: string) -> int {
 
 // One line under the HUD: where the level goes and whether it is saved, and
 // the last message for a few seconds.
-draw_level_hud :: proc(lv: ^Level_State, dirty: bool, missing: int, x, y: i32) {
+draw_level_hud :: proc(lv: ^Level_State, dirty: bool, missing: int, cursor_game: Maybe([2]f32), x, y: i32) {
 	state := "unsaved changes" if dirty else ("saved" if len(lv.saved) > 0 else "not saved yet")
 	col := rl.Color{230, 170, 90, 255} if dirty else rl.Color{150, 200, 150, 255}
 	miss := fmt.tprintf(" | %d model%s missing (kept in the level)", missing, "" if missing == 1 else "s") if missing > 0 else ""
+	cursor := ""
+	if c, ok := cursor_game.?; ok do cursor = fmt.tprintf(" | cursor: game %.1f, %.1f", c.x, c.y)
 	rl.DrawText(
-		fmt.ctprintf("level %s | %s%s | [ctrl+S] save  [ctrl+R] reload", lv.path, state, miss),
+		fmt.ctprintf("level %s | %s%s | [ctrl+S] save  [ctrl+R] reload  [ctrl+E] export mission%s", lv.path, state, miss, cursor),
 		x, y, 16, col,
 	)
 	if lv.msg_len > 0 && time.duration_seconds(time.since(lv.msg_at)) < CONFIRM_S {
@@ -293,6 +314,7 @@ open_level :: proc(
 	delete(lv.title)
 	lv.id = strings.clone(l.id if len(l.id) > 0 else filepath_stem(path))
 	lv.title = strings.clone(l.title if len(l.title) > 0 else lv.id)
+	level_set_game(lv, l.game)
 	lv.baseline = true
 	n := len(p.ed.instances)
 	level_say(lv, missing > 0, "opened %s: %d object%s%s", path, n, "" if n == 1 else "s",
@@ -307,5 +329,122 @@ level_new :: proc(lv: ^Level_State, cloud_path: string) {
 	delete(lv.id)
 	delete(lv.title)
 	lv.saved, lv.id, lv.title = {}, {}, {}
+	level_set_game(lv, nil)
 	level_set_path(lv, scene.default_level_path(cloud_path, context.temp_allocator))
+}
+
+// ---------------------------------------------------------------------------
+// Commandos export
+// ---------------------------------------------------------------------------
+
+// The level's game section, or the one the first export will create: the
+// mission next to the level (<id>.mission.json, merged into
+// <id>.mission.base.json if that exists) and the whole terrain as the region.
+level_game :: proc(lv: ^Level_State, p: ^Placement, wt: World_Terrain) -> (g: scene.Game, ok: bool) {
+	if have, has := lv.game.?; has do return have, true
+	id := lv.id if len(lv.id) > 0 else "level"
+	g.mission = fmt.tprintf("%s.mission.json", id)
+	g.base = fmt.tprintf("%s.mission.base.json", id)
+	if wt.ok {
+		g.origin, g.size = scene.default_region(wt.t, p.world_scale)
+		return g, true
+	}
+	// no terrain: around the objects, 20 m to spare
+	if len(p.ed.instances) == 0 do return {}, false
+	lo, hi := [2]f32{max(f32), max(f32)}, [2]f32{-max(f32), -max(f32)}
+	for inst in p.ed.instances {
+		q := inst.transform.position.xz
+		lo = {min(lo.x, q.x), min(lo.y, q.y)}
+		hi = {max(hi.x, q.x), max(hi.y, q.y)}
+	}
+	margin := 20 * p.world_scale
+	g.origin = lo - margin
+	g.size = {math.ceil((hi.x - lo.x + 2 * margin) / p.world_scale), math.ceil((hi.y - lo.y + 2 * margin) / p.world_scale)}
+	return g, true
+}
+
+// Where the cursor is in game units, for typing spawns and patrols into the
+// base mission.
+level_cursor_game :: proc(lv: ^Level_State, p: ^Placement, wt: World_Terrain) -> Maybe([2]f32) {
+	if !p.cursor_ok do return nil
+	g, ok := level_game(lv, p, wt)
+	if !ok do return nil
+	return scene.to_game(g, p.world_scale, p.cursor.xz)
+}
+
+// Navigation scans the grid (commandos nav/navigation.odin): past this many
+// cells a guard's replanning gets slow. A hint, not a limit.
+NAV_CELLS_HINT :: 200 * 200
+
+// ctrl+E: writes the mission. The level keeps the game section (region and
+// paths), so the next export maps to the same coordinates; save the level to
+// keep it.
+level_export :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, wt: World_Terrain) {
+	g, ok := level_game(lv, p, wt)
+	if !ok {
+		level_say(lv, true, "export: no terrain and no objects, nothing to map")
+		return
+	}
+	mission_path := scene.resolve(lv.path, g.mission, context.temp_allocator)
+	base_path := scene.resolve(lv.path, g.base, context.temp_allocator) if len(g.base) > 0 else ""
+
+	base: json.Value
+	has_base := len(base_path) > 0 && os.exists(base_path)
+	if has_base {
+		data, err := os.read_entire_file(base_path, context.temp_allocator)
+		if err != nil {
+			level_say(lv, true, "export: cannot read %s (%v): nothing written", base_path, err)
+			return
+		}
+		v, vok := scene.parse_mission(data, context.temp_allocator)
+		if !vok {
+			level_say(lv, true, "export: %s is not a JSON object: nothing written", base_path)
+			return
+		}
+		base = v
+	}
+
+	objects := make([dynamic]scene.Export_Object, 0, len(p.ed.instances), context.temp_allocator)
+	for inst in p.ed.instances {
+		e := scene.Export_Object{
+			id       = inst.id,
+			position = inst.transform.position,
+			rotation = inst.transform.rotation,
+			scale    = inst.transform.scale,
+			up       = inst.transform.up,
+		}
+		if a := asset_of(p, inst); a != nil {
+			e.asset = scene.relative(mission_path, a.path, context.temp_allocator)
+			e.size_m = a.size // 0 for a missing model: a prop without a footprint
+		}
+		append(&objects, e)
+	}
+
+	text, stats := scene.export_mission(scene.Export_Input{
+		game         = g,
+		world_scale  = p.world_scale,
+		ground       = wt.t.lo if wt.ok else 0,
+		ter          = wt.t if wt.ok else {},
+		objects      = objects[:],
+		base         = base,
+		id           = lv.id,
+		title        = lv.title,
+		source_level = scene.relative(mission_path, lv.path, context.temp_allocator),
+		terrain_path = scene.relative(mission_path, cloud_path, context.temp_allocator),
+	}, context.temp_allocator)
+	if err := write_level(mission_path, text); err != nil {
+		level_say(lv, true, "export %s failed: %v", mission_path, err)
+		return
+	}
+	new_section := lv.game == nil
+	level_set_game(lv, g)
+
+	notes := make([dynamic]string, context.temp_allocator)
+	if !has_base do append(&notes, fmt.tprintf("no %s: no guards or objective yet", g.base))
+	if stats.outside > 0 do append(&notes, fmt.tprintf("%d object%s outside the region", stats.outside, "" if stats.outside == 1 else "s"))
+	if stats.grid_w * stats.grid_h > NAV_CELLS_HINT do append(&notes, fmt.tprintf("%dx%d m: large for the game's navigation, shrink \"size\" in the level", stats.grid_w, stats.grid_h))
+	if new_section do append(&notes, "region set: ctrl+S keeps it")
+	level_say(lv, false, "exported %s: %d props, %d cover, %d buildings, %dx%d m%s%s",
+		mission_path, stats.props, stats.cover, stats.buildings, stats.grid_w, stats.grid_h,
+		" | " if len(notes) > 0 else "", strings.join(notes[:], " | ", context.temp_allocator))
 }

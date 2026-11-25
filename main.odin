@@ -243,6 +243,9 @@ main :: proc() {
 		if cmd && rl.IsKeyPressed(.S) {
 			level_save(&lv, &placement, cloud_path, ground_proxy.cell_m, iso)
 		}
+		if cmd && rl.IsKeyPressed(.E) {
+			level_export(&lv, &placement, cloud_path, ground_proxy)
+		}
 		if cmd && rl.IsKeyPressed(.R) {
 			switch {
 			case !os.exists(lv.path):
@@ -278,7 +281,7 @@ main :: proc() {
 		// toggles, same letters as pixlsplat
 		if rl.IsKeyPressed(.Q) do cfg.quant = !cfg.quant
 		if rl.IsKeyPressed(.X) do cfg.crisp = !cfg.crisp
-		if rl.IsKeyPressed(.E) do cfg.outline = !cfg.outline
+		if rl.IsKeyPressed(.E) && !cmd do cfg.outline = !cfg.outline
 		if rl.IsKeyPressed(.S) && !cmd do cfg.ss = 3 - cfg.ss // 1 <-> 2
 		if rl.IsKeyPressed(.D) do cfg.dither = 0 if cfg.dither >= 1 else cfg.dither + 0.5
 		if rl.IsKeyPressed(.G) do grade_strength = 1 if grade_strength <= 0 else grade_strength - 0.5 // 1 -> 0.5 -> 0
@@ -421,7 +424,7 @@ main :: proc() {
 		px_per_unit := f32(targets.h) / camera.fovy if game_cam else 0
 		draw_model_hud(&placement, model_err, px_per_unit, 10, 98)
 		draw_terrain_hud(ground_proxy, &placement, 10, 178)
-		draw_level_hud(&lv, dirty, missing, 10, 218)
+		draw_level_hud(&lv, dirty, missing, level_cursor_game(&lv, &placement, ground_proxy), 10, 218)
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 	}
