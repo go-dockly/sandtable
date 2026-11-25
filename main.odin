@@ -18,6 +18,10 @@ package main
 // A GLB object (model.odin, placement.odin) is drawn into the pass 1 target
 // before the splats, with the same view & projection, so it is depth tested
 // against the cloud and resolved by the same pixel-art pass.
+//
+// The terrain proxy (terrain/, terrain_view.odin) is built from the cloud at
+// load: the object stands on it, and its grey-box can be drawn in the same
+// place as the object, instead of or under the splats.
 
 import "core:fmt"
 import "core:math"
@@ -65,7 +69,10 @@ main :: proc() {
 
 	opts, opts_ok := parse_options(os.args[1:])
 	if !opts_ok {
-		fmt.eprintln("usage: sandtable <cloud.spz|.ply> [--model file.glb] [--world-scale u] [--pos x,y,z] [--yaw deg] [--scale s] [--ground y]")
+		fmt.eprintln(
+			"usage: sandtable <cloud.spz|.ply> [--model file.glb] [--world-scale u] [--pos x,y,z] [--yaw deg] [--scale s] [--ground y]\n" +
+			"                 [--snap ground|surface|plane] [--offset y] [--align] [--max-tilt deg] [--cell m] [--terrain-export prefix]",
+		)
 		return
 	}
 	path := opts.cloud if len(opts.cloud) > 0 else "tree.ply"
@@ -114,6 +121,10 @@ main :: proc() {
 	placement := Placement{overlay = true, visible = true}
 	placement_reset(&placement, opts, view)
 
+	ground_proxy := World_Terrain{cell_m = opts.cell_m, export = opts.export}
+	defer world_terrain_destroy(&ground_proxy)
+	world_terrain_build(&ground_proxy, view, placement.world_scale, model_shader.shader)
+
 	// pixlsplat's defaults: quant + outline + crisp on, 2x supersampling, no dither
 	cfg := Post_Settings{quant = true, crisp = true, outline = true, ss = 2, dither = 0}
 	pixel_size := i32(PIXEL_SIZE_DEFAULT)
@@ -154,6 +165,7 @@ main :: proc() {
 						load_err = .None
 						frame_views(&free_cam, &iso, view)
 						placement_reset(&placement, opts, view)
+						world_terrain_build(&ground_proxy, view, placement.world_scale, model_shader.shader)
 						apply_palette(&post, palette_mode, view, model.colors)
 						last_fwd = {}
 					} else {
@@ -182,6 +194,11 @@ main :: proc() {
 			apply_palette(&post, palette_mode, view, model.colors)
 		}
 		if rl.IsKeyPressed(.T) do placement_reset(&placement, opts, view)
+		shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
+		if rl.IsKeyPressed(.Z) && shift {
+			world_terrain_build(&ground_proxy, view, placement.world_scale, model_shader.shader)
+		}
+		if rl.IsKeyPressed(.TAB) do ground_proxy.view = Terrain_View((int(ground_proxy.view) + 1) % len(Terrain_View))
 		// toggles, same letters as pixlsplat
 		if rl.IsKeyPressed(.Q) do cfg.quant = !cfg.quant
 		if rl.IsKeyPressed(.X) do cfg.crisp = !cfg.crisp
@@ -213,7 +230,8 @@ main :: proc() {
 		}
 		near, far := clip_planes(view.extent, game_cam, iso.distance)
 		if model.model.meshCount > 0 {
-			placement_update(&placement, camera, max(view.extent, 1e-4) if view.count > 0 else 1, rl.GetFrameTime())
+			placement_update(&placement, camera, max(view.extent, 1e-4) if view.count > 0 else 1, rl.GetFrameTime(), ground_proxy.ok)
+			placement_settle(&placement, model, ground_proxy.t, ground_proxy.ok)
 		}
 
 		fwd := linalg.normalize(camera.target - camera.position)
@@ -240,10 +258,12 @@ main :: proc() {
 			proj_m = rl.MatrixPerspective(camera.fovy, aspect, near, far)
 		}
 		show_model := model.model.meshCount > 0 && placement.visible
+		show_box := ground_proxy.ok && ground_proxy.view != .Splats
+		show_splats := view.count > 0 && ground_proxy.view != .Greybox
 
 		rl.BeginTextureMode(rt)
 		rl.ClearBackground(rl.BLANK)
-		if view.count > 0 || show_model {
+		if show_splats || show_model || show_box {
 			rl.BeginMode3D(camera)
 			// BeginMode3D builds its projection from raylib's default cull
 			// distances; the splat shader uses proj_m. Meshes must use the same
@@ -251,7 +271,8 @@ main :: proc() {
 			rlgl.SetMatrixProjection(proj_m)
 			// opaque object first: it writes depth, the splats test against it
 			if show_model do model_draw(model, placement.transform, placement.world_scale)
-			if view.count > 0 {
+			if show_box do greybox_draw(ground_proxy.box)
+			if show_splats {
 				splat_set_frame(&splat, view_m, proj_m, rw, rh, game_cam, cfg.crisp, crisp_alpha)
 				splat_draw(&splat, view, cfg.crisp)
 			}
@@ -268,7 +289,7 @@ main :: proc() {
 		dst := rl.Rectangle{0, 0, f32(targets.w * pixel_size), f32(targets.h * pixel_size)}
 		rl.DrawTexturePro(targets.art.texture, src, dst, {0, 0}, 0, rl.WHITE)
 		if show_model && placement.overlay {
-			draw_placement_overlay(model, placement, view_m, proj_m, dst.width, dst.height)
+			draw_placement_overlay(model, placement, view_m, proj_m, dst.width, dst.height, ground_proxy.t, ground_proxy.ok)
 		}
 
 		title := view.name if len(view.name) > 0 else path
@@ -309,7 +330,9 @@ main :: proc() {
 		)
 		px_per_unit := f32(targets.h) / camera.fovy if game_cam else 0
 		draw_model_hud(model, placement, model_err, px_per_unit, 10, 98)
+		draw_terrain_hud(ground_proxy, placement, model.model.meshCount > 0, 10, 158)
 		rl.EndDrawing()
+		free_all(context.temp_allocator)
 	}
 }
 
@@ -352,7 +375,7 @@ draw_model_hud :: proc(a: Model_Asset, p: Placement, err: string, px_per_unit: f
 		x, y + 20, 16, {220, 200, 140, 255},
 	)
 	rl.DrawText(
-		"[IJKL] move  [Y/H] ground  [,/.] rotate 15 (shift 90)  [N/M] scale  [ctrl+N/M] world scale  [T] reset  [B] overlay  [V] hide  [F] print flags",
+		"[IJKL] move  [Y/H] ground / offset  [,/.] rotate 15 (shift 90)  [N/M] scale  [ctrl+N/M] world scale  [T] reset  [B] overlay  [V] hide  [F] print flags",
 		x, y + 40, 16, {160, 160, 160, 255},
 	)
 }

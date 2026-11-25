@@ -1,12 +1,19 @@
 package main
 
-// Block 1 placement: one GLB object on a horizontal ground plane, driven from
-// the keyboard and the command line. No mouse picking yet (Block 2) and no
-// terrain sampling (Block 5): the plane is a single height, a first guess taken
-// from the cloud that the user corrects by eye.
+// Placement: one GLB object, driven from the keyboard and the command line.
+// No mouse picking yet (Block 2).
+//
+// Block 1 stood it on a horizontal ground plane: a single height, a first
+// guess from the cloud corrected by eye. Block 5 stands it on the terrain
+// proxy (terrain/terrain.odin) instead: the height under its footprint, and
+// with alignment on, the slope of the ground under it. The plane stays as a
+// snap mode, for clouds the terrain cannot be built from.
 //
 //   I J K L        move along the ground, relative to the view (shift: faster)
-//   Y H            raise / lower the ground plane (the object stays on it)
+//   Y H            plane: raise / lower the ground plane (the object stays on it)
+//                  terrain: raise / lower the object above the terrain (offset)
+//   Z              snap: ground (DTM) / surface (DSM, roofs) / plane
+//   U              align the object to the slope under it / keep it upright
 //   , .            rotate 15 degrees left / right (shift: 90)
 //   N M            object scale down / up (shift: faster)
 //   ctrl+N M       world scale down / up: calibrate the capture against a
@@ -25,10 +32,21 @@ import "core:strings"
 
 import rl "vendor:raylib"
 
+import "terrain"
+
 Transform :: struct {
 	position: [3]f32, // world position of the pivot (bottom centre of the bounds)
 	rotation: [3]f32, // Euler XYZ, radians. Upright objects only use .y
 	scale:    [3]f32, // object scale: 1 = the GLB's own size, in metres
+	up:       [3]f32, // the object's +Y after the rotation: the ground normal when
+	                  // aligned. {0, 1, 0} (or zero): upright
+}
+
+// Where the object's height comes from.
+Snap :: enum {
+	Ground,  // terrain DTM: bare ground, under trees and between buildings
+	Surface, // terrain DSM: the top, so roofs and walls
+	Plane,   // a horizontal plane at `ground` (Block 1)
 }
 
 // Splat captures are not in metres (Krakow: ~0.005 units per metre), GLBs are.
@@ -40,15 +58,23 @@ Placement :: struct {
 	world_scale: f32, // world units per metre
 	overlay:     bool,
 	visible:     bool,
+	snap:        Snap,
+	offset:      f32,  // terrain snap: height above the terrain, world units
+	align:       bool, // terrain snap: tilt to the slope under the footprint
+	max_tilt:    f32,  // radians
+	on_terrain:  bool, // the pivot is over the terrain grid (else its edge is extended)
 }
 
 // Command line. The cloud is the first argument that is not a flag.
 //
 //   odin run . -- ../ospz/models/krakow.spz --model assets/models/car/volkswagen_typ-82.glb
 //                 [--world-scale u] [--pos x,y,z] [--yaw degrees] [--scale s] [--ground y]
+//                 [--snap ground|surface|plane] [--offset y] [--align] [--max-tilt degrees]
+//                 [--cell metres] [--terrain-export prefix]
 //
 // --world-scale is world units per metre (default 1). --pos sets the ground
-// plane to its y. --ground alone keeps x/z at the cloud centre.
+// plane to its y (snapping to the terrain ignores that y). --ground alone keeps
+// x/z at the cloud centre.
 Options :: struct {
 	cloud:       string,
 	model:       string,
@@ -59,11 +85,21 @@ Options :: struct {
 	ground:      f32,
 	has_pos:     bool,
 	has_ground:  bool,
+	snap:        Snap,
+	offset:      f32, // world units
+	align:       bool,
+	max_tilt:    f32, // degrees
+	cell_m:      f32, // terrain cell, metres; 0 = automatic
+	export:      string,
 }
+
+DEFAULT_MAX_TILT :: f32(20) // degrees; steeper than any street, flatter than a kerb edge
+
 
 parse_options :: proc(args: []string) -> (o: Options, ok: bool) {
 	o.scale = 1
 	o.world_scale = 1
+	o.max_tilt = DEFAULT_MAX_TILT
 	ok = true
 	i := 0
 	for i < len(args) {
@@ -79,6 +115,10 @@ parse_options :: proc(args: []string) -> (o: Options, ok: bool) {
 			continue
 		}
 
+		if arg == "--align" { // the one flag without a value
+			o.align = true
+			continue
+		}
 		name, value := arg, ""
 		has_value := false
 		if eq := strings.index_byte(arg, '='); eq >= 0 {
@@ -128,6 +168,41 @@ parse_options :: proc(args: []string) -> (o: Options, ok: bool) {
 			} else {
 				o.ground, o.has_ground = v, true
 			}
+		case "--snap":
+			switch value {
+			case "ground":  o.snap = .Ground
+			case "surface": o.snap = .Surface
+			case "plane":   o.snap = .Plane
+			case:
+				fmt.eprintf("--snap %q: expected ground, surface or plane\n", value)
+				ok = false
+			}
+		case "--offset":
+			v, vok := strconv.parse_f32(value)
+			if !vok {
+				fmt.eprintf("--offset %q: expected a height above the terrain, world units\n", value)
+				ok = false
+			} else {
+				o.offset = v
+			}
+		case "--max-tilt":
+			v, vok := strconv.parse_f32(value)
+			if !vok || v < 0 || v > 90 {
+				fmt.eprintf("--max-tilt %q: expected 0..90 degrees\n", value)
+				ok = false
+			} else {
+				o.max_tilt = v
+			}
+		case "--cell":
+			v, vok := strconv.parse_f32(value)
+			if !vok || v < 0 {
+				fmt.eprintf("--cell %q: expected the terrain cell in metres, 0 = automatic\n", value)
+				ok = false
+			} else {
+				o.cell_m = v
+			}
+		case "--terrain-export":
+			o.export = value
 		case "--pos":
 			parts := strings.split(value, ",", context.temp_allocator)
 			good := len(parts) == 3
@@ -186,14 +261,50 @@ placement_reset :: proc(p: ^Placement, o: Options, v: Splat_View) {
 		position = position,
 		rotation = {0, o.yaw * math.RAD_PER_DEG, 0},
 		scale    = {o.scale, o.scale, o.scale},
+		up       = {0, 1, 0},
 	}
+	p.snap = o.snap
+	p.offset = o.offset
+	p.align = o.align
+	p.max_tilt = o.max_tilt * math.RAD_PER_DEG
+}
+
+snapped :: proc(p: Placement, has_terrain: bool) -> bool {
+	return p.snap != .Plane && has_terrain
+}
+
+snap_layer :: proc(s: Snap) -> terrain.Layer {
+	return .Surface if s == .Surface else .Ground
+}
+
+// Height (and with align, tilt) from the terrain under the footprint. Call
+// after placement_update, every frame: the object follows the terrain as it
+// moves. Without a terrain, or in plane mode, it stands on the plane.
+placement_settle :: proc(p: ^Placement, a: Model_Asset, ter: terrain.Terrain, has_terrain: bool) {
+	t := &p.transform
+	if !snapped(p^, has_terrain) {
+		t.position.y = p.ground
+		t.up = {0, 1, 0}
+		p.on_terrain = false
+		return
+	}
+	half := object_size_m(a, t^).xz * p.world_scale * 0.5
+	h, n, inside := terrain.fit_footprint(
+		ter, t.position.xz, half, t.rotation.y, snap_layer(p.snap),
+		p.max_tilt if p.align else 0,
+	)
+	t.position.y = h + p.offset
+	t.up = n if p.align else {0, 1, 0}
+	p.on_terrain = inside
+	p.ground = h // the plane follows, so switching to plane mode keeps the height
 }
 
 ROTATE_STEP        :: f32(15)
 ROTATE_STEP_COARSE :: f32(90)
 
 // extent: the cloud's size, so movement speed scales with the capture.
-placement_update :: proc(p: ^Placement, camera: rl.Camera3D, extent: f32, dt: f32) {
+// has_terrain: Y/H move the offset above it rather than the plane.
+placement_update :: proc(p: ^Placement, camera: rl.Camera3D, extent: f32, dt: f32, has_terrain: bool) {
 	shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 	speed := extent * 0.1 * dt * (f32(5) if shift else f32(1))
 
@@ -213,9 +324,19 @@ placement_update :: proc(p: ^Placement, camera: rl.Camera3D, extent: f32, dt: f3
 	if rl.IsKeyDown(.J) do move -= r
 	p.transform.position += move * speed
 
-	if rl.IsKeyDown(.Y) do p.ground += speed
-	if rl.IsKeyDown(.H) do p.ground -= speed
-	p.transform.position.y = p.ground
+	// Y/H: the plane, or the height above the terrain (slower: it is a fine
+	// correction, a few centimetres for a car's tyres)
+	if snapped(p^, has_terrain) {
+		fine := speed * 0.1
+		if rl.IsKeyDown(.Y) do p.offset += fine
+		if rl.IsKeyDown(.H) do p.offset -= fine
+	} else {
+		if rl.IsKeyDown(.Y) do p.ground += speed
+		if rl.IsKeyDown(.H) do p.ground -= speed
+		p.transform.position.y = p.ground
+	}
+	if rl.IsKeyPressed(.Z) && !shift do p.snap = Snap((int(p.snap) + 1) % len(Snap))
+	if rl.IsKeyPressed(.U) do p.align = !p.align
 
 	step := (ROTATE_STEP_COARSE if shift else ROTATE_STEP) * math.RAD_PER_DEG
 	if rl.IsKeyPressed(.COMMA) do p.transform.rotation.y += step // counter-clockwise seen from above
@@ -245,11 +366,19 @@ placement_flags :: proc(p: Placement, allocator := context.allocator) -> string 
 	yaw := t.rotation.y * math.DEG_PER_RAD
 	if yaw < 0 do yaw += 360
 	f := world_fmt(p.world_scale)
+	snap := " --snap plane"
+	if p.snap != .Plane {
+		snap = fmt.tprintf(
+			" --snap %s --offset %s%s --max-tilt %.0f",
+			"ground" if p.snap == .Ground else "surface",
+			fmt.tprintf(f, p.offset), " --align" if p.align else "", p.max_tilt * math.DEG_PER_RAD,
+		)
+	}
 	return fmt.aprintf(
-		"--world-scale %.6f --pos %s,%s,%s --yaw %.1f --scale %.3f",
+		"--world-scale %.6f --pos %s,%s,%s --yaw %.1f --scale %.3f%s",
 		p.world_scale,
 		fmt.tprintf(f, t.position.x), fmt.tprintf(f, t.position.y), fmt.tprintf(f, t.position.z),
-		yaw, t.scale.x,
+		yaw, t.scale.x, snap,
 		allocator = allocator,
 	)
 }
@@ -306,11 +435,38 @@ overlay_line :: proc(vp: rl.Matrix, w, h: f32, a, b: [3]f32, col: rl.Color, thic
 	if oka && okb do rl.DrawLineEx(pa, pb, thick, col)
 }
 
+// A grid line from a to b: straight on the plane, or draped over the terrain
+// in steps of about a cell, so the grid shows the heightmap under the object.
+overlay_ground_line :: proc(
+	vp: rl.Matrix, w, h: f32, a, b: [2]f32, plane_y: f32,
+	ter: terrain.Terrain, layer: terrain.Layer, drape: bool, col: rl.Color,
+) {
+	if !drape {
+		overlay_line(vp, w, h, {a.x, plane_y, a.y}, {b.x, plane_y, b.y}, col)
+		return
+	}
+	d := b - a
+	steps := clamp(int(math.ceil(math.sqrt(d.x * d.x + d.y * d.y) / ter.cell)), 1, 64)
+	prev: [3]f32
+	for k in 0 ..= steps {
+		q := a + d * (f32(k) / f32(steps))
+		y, _ := terrain.sample_height(ter, q.x, q.y, layer)
+		cur := [3]f32{q.x, y, q.y}
+		if k > 0 do overlay_line(vp, w, h, prev, cur, col)
+		prev = cur
+	}
+}
+
 // w, h: size of the drawn picture in screen pixels (art size * pixel size)
-draw_placement_overlay :: proc(a: Model_Asset, p: Placement, view_m, proj_m: rl.Matrix, w, h: f32) {
+draw_placement_overlay :: proc(
+	a: Model_Asset, p: Placement, view_m, proj_m: rl.Matrix, w, h: f32,
+	ter: terrain.Terrain, has_terrain: bool,
+) {
 	vp := proj_m * view_m
 	t := p.transform
 	g := p.ground
+	drape := snapped(p, has_terrain)
+	layer := snap_layer(p.snap)
 
 	// ground grid around the object in whole metres (grid_cell_m), so the
 	// world scale can be checked against the object at a glance
@@ -324,8 +480,8 @@ draw_placement_overlay :: proc(a: Model_Asset, p: Placement, view_m, proj_m: rl.
 	c := t.position
 	for k in -n ..= n {
 		o := f32(k) * cell
-		overlay_line(vp, w, h, {c.x - half, g, c.z + o}, {c.x + half, g, c.z + o}, OVERLAY_GRID)
-		overlay_line(vp, w, h, {c.x + o, g, c.z - half}, {c.x + o, g, c.z + half}, OVERLAY_GRID)
+		overlay_ground_line(vp, w, h, {c.x - half, c.z + o}, {c.x + half, c.z + o}, g, ter, layer, drape, OVERLAY_GRID)
+		overlay_ground_line(vp, w, h, {c.x + o, c.z - half}, {c.x + o, c.z + half}, g, ter, layer, drape, OVERLAY_GRID)
 	}
 
 	if a.model.meshCount <= 0 do return
@@ -358,10 +514,11 @@ draw_placement_overlay :: proc(a: Model_Asset, p: Placement, view_m, proj_m: rl.
 		overlay_line(vp, w, h, corners[e[0]], corners[e[1]], OVERLAY_BOUNDS)
 	}
 
-	// pivot cross on the ground, and the model's +Z as its "front"
-	arm := foot * 0.15
-	overlay_line(vp, w, h, c - {arm, 0, 0}, c + {arm, 0, 0}, OVERLAY_PIVOT, 2)
-	overlay_line(vp, w, h, c - {0, 0, arm}, c + {0, 0, arm}, OVERLAY_PIVOT, 2)
+	// pivot cross in the object's base plane, and the model's +Z as its "front"
+	arm := foot * 0.15 / max(t.scale.x * p.world_scale, 1e-12) // model units
+	pv := a.pivot
+	overlay_line(vp, w, h, to_world(world, pv - {arm, 0, 0}), to_world(world, pv + {arm, 0, 0}), OVERLAY_PIVOT, 2)
+	overlay_line(vp, w, h, to_world(world, pv - {0, 0, arm}), to_world(world, pv + {0, 0, arm}), OVERLAY_PIVOT, 2)
 	front := to_world(world, a.pivot + {0, 0, a.size.z * 0.5 + a.size.z * 0.25})
 	overlay_line(vp, w, h, c, front, OVERLAY_FRONT, 2)
 	if tip, ok := project_point(vp, w, h, front); ok {

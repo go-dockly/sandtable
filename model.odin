@@ -16,6 +16,7 @@ package main
 //     counts the model as solid coverage and draws its ink outline
 
 import "core:fmt"
+import "core:math"
 import "core:os"
 import "core:strings"
 
@@ -113,14 +114,26 @@ release_model_asset :: proc(a: ^Model_Asset) {
 }
 
 // Model space (metres) -> world: scale by object scale x world units per metre,
-// rotate about the pivot, then move the pivot to `t.position`. Euler XYZ in
-// radians; only yaw is driven for now.
+// rotate about the pivot, tilt +Y onto `t.up` (terrain alignment), then move
+// the pivot to `t.position`. Euler XYZ in radians; only yaw is driven for now.
 model_matrix :: proc(a: Model_Asset, t: Transform, world_scale: f32) -> rl.Matrix {
 	s := t.scale * world_scale
 	return rl.MatrixTranslate(t.position.x, t.position.y, t.position.z) *
+		tilt_matrix(t.up) *
 		rl.MatrixRotateXYZ(t.rotation) *
 		rl.MatrixScale(s.x, s.y, s.z) *
 		rl.MatrixTranslate(-a.pivot.x, -a.pivot.y, -a.pivot.z)
+}
+
+// Shortest rotation taking +Y to `up`. Zero or straight up: identity.
+tilt_matrix :: proc(up: [3]f32) -> rl.Matrix {
+	l := math.sqrt(up.x * up.x + up.y * up.y + up.z * up.z)
+	if l < 1e-9 do return rl.Matrix(1)
+	u := up / l
+	axis := [3]f32{u.z, 0, -u.x} // +Y x up
+	s := math.sqrt(axis.x * axis.x + axis.z * axis.z)
+	if s < 1e-7 do return rl.Matrix(1) if u.y > 0 else rl.MatrixRotateX(math.PI)
+	return rl.MatrixRotate(axis / s, math.atan2(s, u.y))
 }
 
 // Call between BeginMode3D / EndMode3D, after the projection has been set to

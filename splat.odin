@@ -40,6 +40,7 @@ Splat_View :: struct {
 	order_px:  []u8,
 	pos:       [][3]f32,
 	colors:    [][4]u8, // DC colour per kept splat, for palette extraction
+	opacity:   []f32,   // per kept splat, for the terrain (terrain/terrain.odin)
 	order:     []u32,
 	depth:     []f32,
 	visible:   int,
@@ -180,6 +181,7 @@ load_view :: proc(path: string) -> (view: Splat_View, err: ospz.Spz_Error) {
 
 	pos := make([][3]f32, n)
 	cols := make([][4]u8, n)
+	ops := make([]f32, n)
 	texels := n * 4
 	data_h := (texels + DATA_W - 1) / DATA_W
 	floats := make([]f32, DATA_W * data_h * 4)
@@ -238,11 +240,13 @@ load_view :: proc(path: string) -> (view: Splat_View, err: ospz.Spz_Error) {
 
 		pos[kept] = {px, py, pz}
 		cols[kept] = {to_u8(cr), to_u8(cg), to_u8(cb), 255}
+		ops[kept] = a
 		kept += 1
 	}
 	if kept == 0 {
 		delete(pos)
 		delete(cols)
+		delete(ops)
 		delete(floats)
 		return {}, .Invalid_Data
 	}
@@ -250,6 +254,7 @@ load_view :: proc(path: string) -> (view: Splat_View, err: ospz.Spz_Error) {
 	view.count = kept
 	view.pos = pos[:kept]
 	view.colors = cols[:kept]
+	view.opacity = ops[:kept]
 	view.center, view.extent = robust_bounds(view.pos, 0.02, 0.98)
 	if view.extent < 1e-4 do view.extent = 1
 	view.name = fmt.aprintf("%s", path)
@@ -301,6 +306,7 @@ release_view :: proc(v: ^Splat_View) {
 	if v.order_tex.id != 0 do rl.UnloadTexture(v.order_tex)
 	delete(v.pos)
 	delete(v.colors)
+	delete(v.opacity)
 	delete(v.order)
 	delete(v.order_px)
 	delete(v.depth)
