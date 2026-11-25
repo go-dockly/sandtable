@@ -20,7 +20,7 @@ odin run . -- ../ospz/models/tree.ply
 With a GLB object on the terrain:
 
 ```
-odin run . -o:speed -- ../ospz/models/krakow.spz --model assets/models/car/volkswagen_typ-82.glb
+odin run . -o:speed -- ../ospz/models/krakow.spz --world-scale 0.005 --model assets/models/car/volkswagen_typ-82.glb
 ```
 
 | Flag | Does |
@@ -29,9 +29,12 @@ odin run . -o:speed -- ../ospz/models/krakow.spz --model assets/models/car/volks
 | `--pos x,y,z` | where its pivot (bottom centre) stands; `y` sets the ground plane |
 | `--ground y` | ground plane height; default: 5th percentile of the cloud's heights |
 | `--yaw deg` | rotation around the vertical axis |
-| `--scale s` | uniform scale, default 1 (GLB metres) |
+| `--world-scale u` | world units per metre of the splat capture, default 1. Krakow is ~0.005. GLBs are in metres and are multiplied by this |
+| `--scale s` | object scale on top of the world scale, default 1 = real size |
 
 `F` prints the current placement as these flags, so a placement found by eye can be reproduced.
+
+The HUD shows the object's size in metres, positions with enough decimals for ~1 cm at the current world scale, and in the game camera how many art pixels the object spans, to judge sprite readability.
 
 ## Keys
 
@@ -52,9 +55,10 @@ Object (with `--model`):
 | `I` `J` `K` `L` | move along the ground, relative to the view (shift: faster) |
 | `Y` `H` | raise / lower the ground plane; the object stays on it |
 | `,` `.` | rotate 15° left / right (shift: 90°) |
-| `N` `M` | scale down / up (shift: faster) |
+| `N` `M` | object scale down / up (shift: faster) |
+| `ctrl` + `N` `M` | world scale down / up: calibrate the capture against a known-size object |
 | `T` | back to the start placement |
-| `B` | overlay: ground grid, bounds, pivot, model +Z |
+| `B` | overlay: ground grid in whole metres, bounds, pivot, model +Z |
 | `V` | hide / show the object |
 | `F` | print the placement as command-line flags |
 
