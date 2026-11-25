@@ -11,6 +11,8 @@ package main
 //   - the fragment shader has a hard "crisp" mode: an opaque ellipse out to
 //     1.5 sigma (pixlsplat's SPLAT_STD_DEV), depth tested. Splats below
 //     `crispAlpha` opacity are dropped. 0.35 is a guess to tune per cloud.
+//   - soft splats are depth tested (not written) so GLB objects drawn first
+//     occlude what is behind them
 //   - blending is ONE / ONE_MINUS_SRC_ALPHA via BeginBlendMode(.ALPHA_PREMULTIPLY),
 //     as pixlsplat does, so the target holds premultiplied RGBA that the post pass
 //     can read coverage from
@@ -103,15 +105,17 @@ splat_set_frame :: proc(
 }
 
 // Call between BeginMode3D / EndMode3D on the splat render target.
-// crisp: opaque and depth tested. Soft: blended back to front, no depth.
+// crisp: opaque, depth tested and written. Soft: blended back to front, depth
+// tested but not written, so splats behind an opaque mesh drawn first (a GLB
+// object, model.odin) are hidden and the ones in front blend over it. With
+// nothing drawn first the depth buffer is clear and every splat passes, as before.
 splat_draw :: proc(s: ^Splat_Shader, v: Splat_View, crisp: bool) {
 	rlgl.DrawRenderBatchActive()
 	rlgl.DisableBackfaceCulling()
+	rlgl.EnableDepthTest()
 	if crisp {
-		rlgl.EnableDepthTest()
 		rlgl.EnableDepthMask()
 	} else {
-		rlgl.DisableDepthTest()
 		rlgl.DisableDepthMask()
 	}
 	rl.BeginBlendMode(.ALPHA_PREMULTIPLY)

@@ -17,6 +17,22 @@ cd sandtable
 odin run . -- ../ospz/models/tree.ply
 ```
 
+With a GLB object on the terrain:
+
+```
+odin run . -o:speed -- ../ospz/models/krakow.spz --model assets/models/car/volkswagen_typ-82.glb
+```
+
+| Flag | Does |
+|------|------|
+| `--model file.glb` | object to place (`.glb` / `.gltf`); a `.glb` can also be dropped on the window |
+| `--pos x,y,z` | where its pivot (bottom centre) stands; `y` sets the ground plane |
+| `--ground y` | ground plane height; default: 5th percentile of the cloud's heights |
+| `--yaw deg` | rotation around the vertical axis |
+| `--scale s` | uniform scale, default 1 (GLB metres) |
+
+`F` prints the current placement as these flags, so a placement found by eye can be reproduced.
+
 ## Keys
 
 | Key | Does |
@@ -28,6 +44,19 @@ odin run . -- ../ospz/models/tree.ply
 | `G` | Commandos colour grade strength 1 / 0.5 / 0 (Commandos palette only) |
 | `[` `]` | hard mode: drop splats below this opacity |
 | `R` | reframe |
+
+Object (with `--model`):
+
+| Key | Does |
+|-----|------|
+| `I` `J` `K` `L` | move along the ground, relative to the view (shift: faster) |
+| `Y` `H` | raise / lower the ground plane; the object stays on it |
+| `,` `.` | rotate 15° left / right (shift: 90°) |
+| `N` `M` | scale down / up (shift: faster) |
+| `T` | back to the start placement |
+| `B` | overlay: ground grid, bounds, pivot, model +Z |
+| `V` | hide / show the object |
+| `F` | print the placement as command-line flags |
 
 Game camera: 38° Commandos tilt stays fixed. Left-drag or a sideways two-finger swipe rotates around the vertical axis, `←` `→` rotate by 90°, shift + left-drag (or right/middle-drag) pans, vertical scroll zooms, `R` returns to 45°. Free camera: left-drag orbits, wheel zooms.
 
@@ -41,6 +70,8 @@ Game camera: 38° Commandos tilt stays fixed. Left-drag or a sideways two-finger
 | `cameras.odin` | isometric camera mirrors `commandos/camera/isometric.odin`, scaled to the cloud; free orbit from the ospz viewer |
 | `splat.odin` | loader, sort & shader from `ospz/viewer/main.odin`, with ortho projection & a hard mode added |
 | `main.odin` | pass sequencing from `pixlsplat/src/main.odin` |
+| `model.odin` | GLB objects as raylib meshes in the splat pass; pivot, palette & lighting lessons from pixlsplat's models |
+| `placement.odin` | Block 1 placement: transform, ground plane, keyboard controls, command line, editor overlay |
 
 
 The hard part of a viewer: loading & rendering a 3D Gaussian Splatting scene is in. The next step isn't to turn it into Blender, but to follow a focused mission:
@@ -449,6 +480,8 @@ Goal: the Volkswagen exists in Krakow
 - Verify depth & scale against the splat.
 
 **Deliverable:** a Volkswagen visibly standing inside `krakow.spz`.
+
+**Status:** implemented. The object is drawn into the splat target before the splats with the splat pass's own projection, so it is depth tested against the cloud (crisp & soft) and resolved by the same palette / outline pass; its colours join the extracted palette. Placement is keyboard + flags on a single-height ground plane. See `model.odin`, `placement.odin`.
 
 ## **Block 2 — Placement interaction**
 

@@ -8,17 +8,24 @@ package main
 //
 //   cd sandtable
 //   odin run . -- ../ospz/models/tree.ply
+//   odin run . -- ../ospz/models/krakow.spz --model assets/models/car/volkswagen_typ-82.glb
 //
 // Pass 1 draws the splat cloud into an off-screen target at ss x the art
 // resolution (premultiplied RGBA, transparent where nothing was drawn).
 // Pass 2 (post.odin, from pixlsplat) resolves it to palette-snapped, outlined
 // pixel art at the art resolution. The result is scaled up with nearest-neighbour.
+//
+// A GLB object (model.odin, placement.odin) is drawn into the pass 1 target
+// before the splats, with the same view & projection, so it is depth tested
+// against the cloud and resolved by the same pixel-art pass.
 
 import "core:fmt"
+import "core:math"
 import "core:math/linalg"
 import "core:os"
 
 import rl "vendor:raylib"
+import rlgl "vendor:raylib/rlgl"
 
 BACKGROUND :: [4]u8{16, 14, 20, 255}
 
@@ -27,8 +34,15 @@ frame_views :: proc(free_cam: ^rl.Camera3D, iso: ^Iso, v: Splat_View) {
 	iso_frame(iso, v.center, v.extent)
 }
 
-apply_palette :: proc(post: ^Post, mode: Palette_Mode, v: Splat_View) {
-	pal := build_palette(mode, v.colors, BACKGROUND)
+// Share of the extracted palette's samples that come from the GLB object.
+MODEL_PALETTE_SHARE :: f32(0.12)
+
+apply_palette :: proc(post: ^Post, mode: Palette_Mode, v: Splat_View, model_colors: [][4]u8 = nil) {
+	cols := v.colors
+	mixed := mix_palette_colors(v.colors, model_colors, MODEL_PALETTE_SHARE)
+	defer delete(mixed)
+	if mixed != nil do cols = mixed
+	pal := build_palette(mode, cols, BACKGROUND)
 	defer delete(pal)
 	post_set_palette(post, pal[:], nil, BACKGROUND)
 }
@@ -49,10 +63,12 @@ main :: proc() {
 	defer rl.CloseWindow()
 	rl.SetTargetFPS(60)
 
-	path := "tree.ply"
-	if len(os.args) > 1 {
-		path = os.args[1]
+	opts, opts_ok := parse_options(os.args[1:])
+	if !opts_ok {
+		fmt.eprintln("usage: sandtable <cloud.spz|.ply> [--model file.glb] [--pos x,y,z] [--yaw deg] [--scale s] [--ground y]")
+		return
 	}
+	path := opts.cloud if len(opts.cloud) > 0 else "tree.ply"
 
 	view, load_err := load_view(path)
 	defer release_view(&view)
@@ -75,6 +91,29 @@ main :: proc() {
 	targets: Targets
 	defer targets_destroy(&targets)
 
+	model_shader, model_shader_ok := model_shader_init()
+	if !model_shader_ok {
+		fmt.eprintln("model shader failed to compile")
+		return
+	}
+	defer model_shader_unload(&model_shader)
+
+	model: Model_Asset
+	defer release_model_asset(&model)
+	// path of a model that failed to load; a copy, as dropped paths die with
+	// UnloadDroppedFiles
+	model_err_buf: [512]u8
+	model_err := ""
+	if len(opts.model) > 0 {
+		if m, ok := load_model_asset(opts.model, model_shader.shader); ok {
+			model = m
+		} else {
+			model_err = fmt.bprint(model_err_buf[:], opts.model)
+		}
+	}
+	placement := Placement{overlay = true, visible = true}
+	placement_reset(&placement, opts, view)
+
 	// pixlsplat's defaults: quant + outline + crisp on, 2x supersampling, no dither
 	cfg := Post_Settings{quant = true, crisp = true, outline = true, ss = 2, dither = 0}
 	pixel_size := i32(PIXEL_SIZE_DEFAULT)
@@ -86,7 +125,7 @@ main :: proc() {
 	free_cam: rl.Camera3D
 	iso: Iso
 	frame_views(&free_cam, &iso, view)
-	apply_palette(&post, palette_mode, view)
+	apply_palette(&post, palette_mode, view, model.colors)
 
 	last_fwd: [3]f32
 	last_pos: [3]f32
@@ -97,17 +136,30 @@ main :: proc() {
 			files := rl.LoadDroppedFiles()
 			if files.count > 0 {
 				p := string(files.paths[0])
-				next, e := load_view(p)
-				if e == .None {
-					release_view(&view)
-					view = next
-					load_err = .None
-					frame_views(&free_cam, &iso, view)
-					apply_palette(&post, palette_mode, view)
-					last_fwd = {}
+				if is_model_path(p) {
+					// swap the object, keep where it stands
+					if m, ok := load_model_asset(p, model_shader.shader); ok {
+						release_model_asset(&model)
+						model = m
+						model_err = ""
+						apply_palette(&post, palette_mode, view, model.colors)
+					} else {
+						model_err = fmt.bprint(model_err_buf[:], p)
+					}
 				} else {
-					load_err = e
-					fmt.eprintf("load %s: %v\n", p, e)
+					next, e := load_view(p)
+					if e == .None {
+						release_view(&view)
+						view = next
+						load_err = .None
+						frame_views(&free_cam, &iso, view)
+						placement_reset(&placement, opts, view)
+						apply_palette(&post, palette_mode, view, model.colors)
+						last_fwd = {}
+					} else {
+						load_err = e
+						fmt.eprintf("load %s: %v\n", p, e)
+					}
 				}
 			}
 			rl.UnloadDroppedFiles(files)
@@ -127,8 +179,9 @@ main :: proc() {
 			} else {
 				palette_mode = .Extracted
 			}
-			apply_palette(&post, palette_mode, view)
+			apply_palette(&post, palette_mode, view, model.colors)
 		}
+		if rl.IsKeyPressed(.T) do placement_reset(&placement, opts, view)
 		// toggles, same letters as pixlsplat
 		if rl.IsKeyPressed(.Q) do cfg.quant = !cfg.quant
 		if rl.IsKeyPressed(.X) do cfg.crisp = !cfg.crisp
@@ -159,6 +212,9 @@ main :: proc() {
 			camera = free_cam
 		}
 		near, far := clip_planes(view.extent, game_cam, iso.distance)
+		if model.model.meshCount > 0 {
+			placement_update(&placement, camera, max(view.extent, 1e-4) if view.count > 0 else 1, rl.GetFrameTime())
+		}
 
 		fwd := linalg.normalize(camera.target - camera.position)
 		if view.count > 0 &&
@@ -169,27 +225,36 @@ main :: proc() {
 			last_fwd, last_pos = fwd, camera.position
 		}
 
-		// ---- pass 1: splats into a transparent, premultiplied target ---------
+		// ---- pass 1: object + splats into a transparent, premultiplied target -
 		rt := targets.scene[cfg.ss]
 		rw, rh := f32(rt.texture.width), f32(rt.texture.height)
 
+		aspect := rw / rh
+		view_m := rl.GetCameraMatrix(camera)
+		proj_m: rl.Matrix
+		if game_cam {
+			half_h := camera.fovy * 0.5
+			half_w := half_h * aspect
+			proj_m = rl.MatrixOrtho(-half_w, half_w, -half_h, half_h, near, far)
+		} else {
+			proj_m = rl.MatrixPerspective(camera.fovy, aspect, near, far)
+		}
+		show_model := model.model.meshCount > 0 && placement.visible
+
 		rl.BeginTextureMode(rt)
 		rl.ClearBackground(rl.BLANK)
-		if view.count > 0 {
-			aspect := rw / rh
-			view_m := rl.GetCameraMatrix(camera)
-			proj_m: rl.Matrix
-			if game_cam {
-				half_h := camera.fovy * 0.5
-				half_w := half_h * aspect
-				proj_m = rl.MatrixOrtho(-half_w, half_w, -half_h, half_h, near, far)
-			} else {
-				proj_m = rl.MatrixPerspective(camera.fovy, aspect, near, far)
-			}
-			splat_set_frame(&splat, view_m, proj_m, rw, rh, game_cam, cfg.crisp, crisp_alpha)
-
+		if view.count > 0 || show_model {
 			rl.BeginMode3D(camera)
-			splat_draw(&splat, view, cfg.crisp)
+			// BeginMode3D builds its projection from raylib's default cull
+			// distances; the splat shader uses proj_m. Meshes must use the same
+			// one or their depth does not line up with the splats'.
+			rlgl.SetMatrixProjection(proj_m)
+			// opaque object first: it writes depth, the splats test against it
+			if show_model do model_draw(model, placement.transform)
+			if view.count > 0 {
+				splat_set_frame(&splat, view_m, proj_m, rw, rh, game_cam, cfg.crisp, crisp_alpha)
+				splat_draw(&splat, view, cfg.crisp)
+			}
 			rl.EndMode3D()
 		}
 		rl.EndTextureMode()
@@ -202,6 +267,9 @@ main :: proc() {
 		src := rl.Rectangle{0, 0, f32(targets.w), -f32(targets.h)} // render textures are upside down
 		dst := rl.Rectangle{0, 0, f32(targets.w * pixel_size), f32(targets.h * pixel_size)}
 		rl.DrawTexturePro(targets.art.texture, src, dst, {0, 0}, 0, rl.WHITE)
+		if show_model && placement.overlay {
+			draw_placement_overlay(model, placement, view_m, proj_m, dst.width, dst.height)
+		}
 
 		title := view.name if len(view.name) > 0 else path
 		rl.DrawText(fmt.ctprintf("%s", title), 10, 10, 20, rl.RAYWHITE)
@@ -239,6 +307,34 @@ main :: proc() {
 			"[C] camera  [-/+] pixel size  [S] ss  [R] reset | game: drag/arrows rotate, shift/right-drag pan, scroll zoom | free: drag orbit | drop a .spz or .ply",
 			10, 78, 16, {160, 160, 160, 255},
 		)
+		draw_model_hud(model, placement, model_err, 10, 98)
 		rl.EndDrawing()
 	}
+}
+
+draw_model_hud :: proc(a: Model_Asset, p: Placement, err: string, x, y: i32) {
+	if len(err) > 0 {
+		rl.DrawText(fmt.ctprintf("model load failed: %s", err), x, y, 18, {230, 90, 80, 255})
+		return
+	}
+	if a.model.meshCount <= 0 {
+		rl.DrawText("no object: --model file.glb, or drop a .glb", x, y, 16, {160, 160, 160, 255})
+		return
+	}
+	t := p.transform
+	yaw := t.rotation.y * math.DEG_PER_RAD
+	if yaw < 0 do yaw += 360
+	sz := a.size * t.scale
+	rl.DrawText(
+		fmt.ctprintf(
+			"%s | pos %.2f %.2f %.2f | yaw %.0f | scale %.3f | size %.2f x %.2f x %.2f (x y z) | ground %.2f%s",
+			a.path, t.position.x, t.position.y, t.position.z, yaw, t.scale.x,
+			sz.x, sz.y, sz.z, p.ground, "" if p.visible else " | hidden",
+		),
+		x, y, 16, {220, 200, 140, 255},
+	)
+	rl.DrawText(
+		"[IJKL] move  [Y/H] ground  [,/.] rotate 15 (shift 90)  [N/M] scale  [T] reset  [B] overlay  [V] hide  [F] print flags",
+		x, y + 20, 16, {160, 160, 160, 255},
+	)
 }
