@@ -245,3 +245,14 @@ game_section_round_trips :: proc(t: ^testing.T) {
 	g, ok := back.game.?
 	testing.expectf(t, ok && g.mission == "krakow.mission.json" && g.base == "krakow.mission.base.json" && g.origin == {-0.25, 0.125} && g.size == {120, 90} && !game_buildings(g), "%v", back.game)
 }
+
+@(test)
+mission_points_at_the_map :: proc(t: ^testing.T) {
+	g := Game{origin = {0, 0}, size = {50, 50}}
+	base, _ := parse_mission(transmute([]byte)string(`{"map": "old.map.json", "guards": []}`), context.temp_allocator)
+	out, _ := export_mission(Export_Input{game = g, world_scale = 1, base = base, terrain_path = "t.spz", map_path = "krakow.map.json"}, context.temp_allocator)
+	testing.expect(t, strings.contains(out, "\"terrain\": \"t.spz\",\n  \"map\": \"krakow.map.json\""), out)
+	testing.expect_value(t, strings.count(out, "\"map\""), 1) // the base's is replaced, not repeated
+	none, _ := export_mission(Export_Input{game = g, world_scale = 1, terrain_path = "t.spz"}, context.temp_allocator)
+	testing.expect(t, !strings.contains(none, "\"map\""), "no map, no key")
+}

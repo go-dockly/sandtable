@@ -151,6 +151,8 @@ main :: proc() {
 	ground_proxy := World_Terrain{cell_m = opts.cell_m, export = opts.export}
 	defer world_terrain_destroy(&ground_proxy)
 	world_terrain_build(&ground_proxy, view, placement.world_scale, model_shader.shader)
+	game_map: World_Map
+	defer world_map_destroy(&game_map)
 
 	// pixlsplat's defaults: quant + outline + crisp on, 2x supersampling, no dither
 	cfg := Post_Settings{quant = true, crisp = true, outline = true, ss = 2, dither = 0}
@@ -244,7 +246,7 @@ main :: proc() {
 			level_save(&lv, &placement, cloud_path, ground_proxy.cell_m, iso)
 		}
 		if cmd && rl.IsKeyPressed(.E) {
-			level_export(&lv, &placement, cloud_path, ground_proxy)
+			level_export(&lv, &placement, cloud_path, ground_proxy, &game_map, model_shader.shader)
 		}
 		if cmd && rl.IsKeyPressed(.R) {
 			switch {
@@ -276,8 +278,12 @@ main :: proc() {
 		shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 		if rl.IsKeyPressed(.Z) && shift && !cmd {
 			world_terrain_build(&ground_proxy, view, placement.world_scale, model_shader.shader)
+			if ground_proxy.view == .Map do world_map_build(&game_map, &lv, &placement, ground_proxy, model_shader.shader)
 		}
-		if rl.IsKeyPressed(.TAB) do ground_proxy.view = Terrain_View((int(ground_proxy.view) + 1) % len(Terrain_View))
+		if rl.IsKeyPressed(.TAB) {
+			ground_proxy.view = Terrain_View((int(ground_proxy.view) + 1) % len(Terrain_View))
+			if ground_proxy.view == .Map do world_map_build(&game_map, &lv, &placement, ground_proxy, model_shader.shader)
+		}
 		// toggles, same letters as pixlsplat
 		if rl.IsKeyPressed(.Q) do cfg.quant = !cfg.quant
 		if rl.IsKeyPressed(.X) do cfg.crisp = !cfg.crisp
@@ -353,12 +359,14 @@ main :: proc() {
 
 		// ---- pass 1: objects + splats into a transparent, premultiplied target
 		show_model := placement.visible && placement_has_objects(&placement)
-		show_box := ground_proxy.ok && ground_proxy.view != .Splats
-		show_splats := view.count > 0 && ground_proxy.view != .Greybox
+		show_box := ground_proxy.ok && (ground_proxy.view == .Greybox || ground_proxy.view == .Both)
+		show_map := ground_proxy.view == .Map && game_map.ok
+		show_splats := view.count > 0 && (ground_proxy.view == .Splats || ground_proxy.view == .Both)
+		if show_map do world_map_guard(&game_map, placement.cursor, placement.cursor_ok, camera.target - camera.position)
 
 		rl.BeginTextureMode(rt)
 		rl.ClearBackground(rl.BLANK)
-		if show_splats || show_model || show_box {
+		if show_splats || show_model || show_box || show_map {
 			rl.BeginMode3D(camera)
 			// BeginMode3D builds its projection from raylib's default cull
 			// distances; the splat shader uses proj_m. Meshes must use the same
@@ -367,6 +375,7 @@ main :: proc() {
 			// opaque objects first: they write depth, the splats test against them
 			if show_model do placement_draw(&placement)
 			if show_box do greybox_draw(ground_proxy.box)
+			if show_map do world_map_draw(&game_map)
 			if show_splats {
 				splat_set_frame(&splat, view_m, proj_m, rw, rh, game_cam, cfg.crisp, crisp_alpha)
 				splat_draw(&splat, view, cfg.crisp)
@@ -425,6 +434,7 @@ main :: proc() {
 		draw_model_hud(&placement, model_err, px_per_unit, 10, 98)
 		draw_terrain_hud(ground_proxy, &placement, 10, 178)
 		draw_level_hud(&lv, dirty, missing, level_cursor_game(&lv, &placement, ground_proxy), 10, 218)
+		if ground_proxy.view == .Map do draw_map_hud(&game_map, &lv, 10, 238)
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 	}

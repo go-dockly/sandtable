@@ -7,7 +7,7 @@ package main
 // against the splats, pixel-art post), so it can replace the splats or be
 // seen through them.
 //
-//   Tab        view: splats / grey-box / both
+//   Tab        view: splats / grey-box / both / gameplay map
 //   shift+Z    rebuild the terrain at the current world scale
 
 import "core:fmt"
@@ -24,6 +24,7 @@ Terrain_View :: enum {
 	Splats,
 	Greybox,
 	Both,
+	Map, // the gameplay map (map_view.odin)
 }
 
 World_Terrain :: struct {

@@ -35,6 +35,7 @@ Level_State :: struct {
 	ours:      bool,   // path was opened or written here (or does not exist): ctrl+S may write it
 	id, title: string, // owned
 	game:      Maybe(scene.Game), // the Commandos export; its strings owned
+	map_section: Maybe(scene.Map_Section), // the gameplay map: cell, yaw, edits; owned
 	confirm:   enum { None, Overwrite, Discard }, // waiting for the second press (CONFIRM_S)
 	confirm_at: time.Time,
 	baseline:  bool, // just loaded: take `saved` after the objects have settled
@@ -50,6 +51,7 @@ level_destroy :: proc(lv: ^Level_State) {
 	delete(lv.id)
 	delete(lv.title)
 	level_set_game(lv, nil)
+	level_set_map(lv, nil)
 	lv^ = {}
 }
 
@@ -143,6 +145,7 @@ level_text :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, cell_m: 
 		max_tilt     = p.max_tilt,
 		view         = view,
 		game         = lv.game,
+		map_section  = lv.map_section,
 	}
 	l := scene.build(&p.ed, paths, h)
 	return scene.encode(l)
@@ -315,6 +318,7 @@ open_level :: proc(
 	lv.id = strings.clone(l.id if len(l.id) > 0 else filepath_stem(path))
 	lv.title = strings.clone(l.title if len(l.title) > 0 else lv.id)
 	level_set_game(lv, l.game)
+	level_set_map(lv, l.map_section)
 	lv.baseline = true
 	n := len(p.ed.instances)
 	level_say(lv, missing > 0, "opened %s: %d object%s%s", path, n, "" if n == 1 else "s",
@@ -330,6 +334,7 @@ level_new :: proc(lv: ^Level_State, cloud_path: string) {
 	delete(lv.title)
 	lv.saved, lv.id, lv.title = {}, {}, {}
 	level_set_game(lv, nil)
+	level_set_map(lv, nil)
 	level_set_path(lv, scene.default_level_path(cloud_path, context.temp_allocator))
 }
 
@@ -376,10 +381,10 @@ level_cursor_game :: proc(lv: ^Level_State, p: ^Placement, wt: World_Terrain) ->
 // cells a guard's replanning gets slow. A hint, not a limit.
 NAV_CELLS_HINT :: 200 * 200
 
-// ctrl+E: writes the mission. The level keeps the game section (region and
-// paths), so the next export maps to the same coordinates; save the level to
-// keep it.
-level_export :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, wt: World_Terrain) {
+// ctrl+E: writes the mission, and the gameplay map next to it. The level
+// keeps the game section (region and paths) and the map's yaw, so the next
+// export maps to the same coordinates; save the level to keep them.
+level_export :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, wt: World_Terrain, wm: ^World_Map, shader: rl.Shader) {
 	g, ok := level_game(lv, p, wt)
 	if !ok {
 		level_say(lv, true, "export: no terrain and no objects, nothing to map")
@@ -420,6 +425,20 @@ level_export :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, wt: Wo
 		append(&objects, e)
 	}
 
+	// the gameplay map first, so the mission can point at it
+	map_rel := ""
+	map_note := ""
+	if world_map_build(wm, lv, p, wt, shader) {
+		rel, merr := world_map_export(wm, lv, mission_path)
+		if merr != .None {
+			map_note = fmt.tprintf("map not written: %v", merr)
+		} else {
+			map_rel = rel
+			map_note = fmt.tprintf("map %s: %d buildings, %d trees%s", rel, wm.stats.buildings, wm.stats.trees,
+				fmt.tprintf(", %d edit problems", wm.problems) if wm.problems > 0 else "")
+		}
+	}
+
 	text, stats := scene.export_mission(scene.Export_Input{
 		game         = g,
 		world_scale  = p.world_scale,
@@ -431,6 +450,7 @@ level_export :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, wt: Wo
 		title        = lv.title,
 		source_level = scene.relative(mission_path, lv.path, context.temp_allocator),
 		terrain_path = scene.relative(mission_path, cloud_path, context.temp_allocator),
+		map_path     = map_rel,
 	}, context.temp_allocator)
 	if err := write_level(mission_path, text); err != nil {
 		level_say(lv, true, "export %s failed: %v", mission_path, err)
@@ -444,6 +464,7 @@ level_export :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, wt: Wo
 	if stats.outside > 0 do append(&notes, fmt.tprintf("%d object%s outside the region", stats.outside, "" if stats.outside == 1 else "s"))
 	if stats.grid_w * stats.grid_h > NAV_CELLS_HINT do append(&notes, fmt.tprintf("%dx%d m: large for the game's navigation, shrink \"size\" in the level", stats.grid_w, stats.grid_h))
 	if new_section do append(&notes, "region set: ctrl+S keeps it")
+	if len(map_note) > 0 do append(&notes, map_note)
 	level_say(lv, false, "exported %s: %d props, %d cover, %d buildings, %dx%d m%s%s",
 		mission_path, stats.props, stats.cover, stats.buildings, stats.grid_w, stats.grid_h,
 		" | " if len(notes) > 0 else "", strings.join(notes[:], " | ", context.temp_allocator))

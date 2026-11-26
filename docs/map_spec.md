@@ -30,7 +30,7 @@ One map unit is a metre, and the map frame is fixed per level, so nothing typed 
 
 - **Frame.** The level's game region: an origin (world x, z), a size in metres, and a new **yaw** that turns the map to the capture's street grid, so buildings come out square. World to map: subtract the origin, rotate by -yaw, divide by the world scale.
 - **Axes.** Map x right and y down in the top view, height h up, all in metres. Heights are measured from the frame's ground reference (the terrain's lowest ground).
-- **Cell.** 0.5 m by default (`cell` per map). A person is about 0.8 m across, and a 200 × 200 m map is 400 × 400 cells a layer.
+- **Cell.** 1 m by default (`cell` per map), as decided below; 0.5 m works too. A person is about 0.8 m across, and a 200 × 200 m map is 200 × 200 cells a layer.
 - **Views.** Four isometric views at azimuth 45° + k × 90°, the 38° tilt fixed. The map never depends on the view; only drawing does.
 
 ## The map: layers, cells, heights
@@ -182,10 +182,10 @@ The first slice is one Krakow street end to end: an automatic map with two kinds
 
 The slice:
 
-- [ ] gamemap v0 in commandos: format, load and save, layered A\*, `can_see`, with tests
-- [ ] sandtable builds ground, square buildings with flat roofs and trees from the Krakow terrain, with the aligned frame
-- [ ] Edits: flatten, building height and walkable roof, a ladder link
-- [ ] `Tab` shows the layers; one guard's vision cone is drawn with `gamemap.visible`
+- [x] gamemap v0 in commandos: format, load and save, layered A\*, `can_see`, with tests
+- [x] sandtable builds ground, square buildings with flat roofs and trees from the Krakow terrain, with the aligned frame (tested on a synthetic town at Krakow's scale; not yet on the Krakow capture)
+- [x] Edits: flatten, building height and walkable roof, a ladder link (written in the level by hand; grid tools to come)
+- [ ] `Tab` shows the layers; one guard's vision cone is drawn with `gamemap.visible` (built and compiling, not yet seen running)
 - [ ] commandos loads the Krakow map: a guard patrols the street, sees over a low wall, and the player climbs a ladder onto a roof
 - [ ] Speed test: the splat backdrop plus 10 characters at 60 fps on the hardware you target
 

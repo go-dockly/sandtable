@@ -83,6 +83,7 @@ Level :: struct {
 	next_id:      u64 `json:"nextId"`,
 	view:         Maybe(View),
 	game:         Maybe(Game), // the Commandos export (game.odin); nil until the first one
+	map_section:  Maybe(Map_Section) `json:"map"`, // the gameplay map (map.odin); nil until the first one
 	assets:       []Asset_Ref,
 	objects:      []Object,
 }
@@ -107,6 +108,7 @@ destroy :: proc(l: ^Level) {
 		delete(g.mission)
 		delete(g.base)
 	}
+	if ms, ok := l.map_section.?; ok do destroy_map_section(&ms)
 	l^ = {}
 }
 
@@ -159,6 +161,7 @@ encode :: proc(l: Level, allocator := context.allocator) -> string {
 		fmt.sbprintf(&b, "  \"game\": {{ \"mission\": %s, \"base\": %s, \"origin\": [%s, %s], \"size\": [%s, %s], \"buildingsFromTerrain\": %v }},\n",
 			quote(g.mission), quote(g.base), num(g.origin.x), num(g.origin.y), num(g.size.x), num(g.size.y), game_buildings(g))
 	}
+	if ms, ok := l.map_section.?; ok do encode_map_section(&b, ms)
 
 	w(&b, "  \"assets\": [")
 	for a, i in l.assets {
@@ -278,6 +281,7 @@ decode :: proc(data: []byte, allocator := context.allocator) -> (l: Level, warni
 			append(&warn, fmt.tprintf("object %d: asset %q is not in \"assets\"", o.id, o.asset))
 		}
 	}
+	if ms, ok := &l.map_section.?; ok do check_map_section(ms, &warn, allocator)
 	return l, warn[:], .None
 }
 
@@ -326,6 +330,7 @@ Header :: struct {
 	max_tilt:     f32, // radians, as the editor keeps it
 	view:         Maybe(View),
 	game:         Maybe(Game),
+	map_section:  Maybe(Map_Section),
 }
 
 // A level from the editor's instances. asset_paths[i] is asset i's path,
@@ -350,6 +355,7 @@ build :: proc(ed: ^editor.Editor, asset_paths: []string, h: Header, allocator :=
 		g.base = strings.clone(g.base)
 		l.game = g
 	}
+	if ms, ok := h.map_section.?; ok do l.map_section = clone_map_section(ms)
 
 	// asset index -> id, for the assets in use, in order of first use
 	ids := make([]string, len(asset_paths), context.temp_allocator)

@@ -9,6 +9,7 @@ import "core:strings"
 import "core:testing"
 
 import "../editor"
+import "cmd:gamemap"
 
 car :: proc(x, z: f32, asset: int) -> editor.Instance {
 	return editor.Instance{
@@ -221,4 +222,64 @@ save_and_load_a_file :: proc(t: ^testing.T) {
 	back, _, err := decode(data)
 	defer destroy(&back)
 	testing.expect(t, err == .None && len(back.objects) == 3)
+}
+
+@(test)
+map_section_round_trip :: proc(t: ^testing.T) {
+	ed: editor.Editor
+	defer editor.destroy(&ed)
+	three_cars(&ed)
+
+	h := header()
+	region := [][2]f32{{0, 0}, {8, 0}, {8, 8}, {0, 8}}
+	h.map_section = Map_Section{
+		file = "krakow.map.json",
+		cell = 1,
+		yaw  = 19.5,
+		edits = []gamemap.Edit{
+			{id = "e1", kind = .Building, target = "b:31,27", walkable_roof = true, height = 10.5},
+			{id = "e2", kind = .Link, link = .Ladder, a = {24, 9.25, 0}, b = {24, 11, 10.5}},
+			{id = "e3", kind = .Flatten, region = region, fit = true},
+			{id = "e1", kind = .Remove, target = "t:4,4"}, // a taken id
+		},
+	}
+	l := build(&ed, PATHS, h)
+	defer destroy(&l)
+	text := encode(l)
+	defer delete(text)
+
+	// one line per edit, only what it sets
+	testing.expect(t, strings.contains(text, `{ "id": "e1", "kind": "Building", "target": "b:31,27", "height": 10.5, "walkableRoof": true }`), text)
+	testing.expect(t, strings.contains(text, `{ "id": "e2", "kind": "Link", "link": "Ladder", "a": [24, 9.25, 0], "b": [24, 11, 10.5] }`), text)
+	testing.expect(t, strings.contains(text, `"region": [[0, 0], [8, 0], [8, 8], [0, 8]], "fit": true }`), text)
+	testing.expect(t, strings.contains(text, `"yaw": 19.5`), "the frame's yaw is kept")
+
+	back, warnings, err := decode(transmute([]byte)text)
+	defer destroy(&back)
+	testing.expect_value(t, err, Decode_Error.None)
+	ms, has := back.map_section.?
+	testing.expect(t, has, "the map section reads back")
+	if !has do return
+	testing.expect_value(t, ms.file, "krakow.map.json")
+	y, has_yaw := ms.yaw.?
+	testing.expect(t, has_yaw && y == 19.5, "yaw")
+	testing.expect_value(t, len(ms.edits), 4)
+	if len(ms.edits) < 4 do return
+	e1 := ms.edits[0]
+	testing.expect_value(t, e1.kind, gamemap.Edit_Kind.Building)
+	wr, has_wr := e1.walkable_roof.?
+	testing.expect(t, has_wr && wr, "walkable roof")
+	hh, has_h := e1.height.?
+	testing.expect(t, has_h && hh == 10.5, "height")
+	testing.expect_value(t, ms.edits[1].link, gamemap.Link_Kind.Ladder)
+	testing.expect_value(t, ms.edits[1].b, [3]f32{24, 11, 10.5})
+	testing.expect_value(t, len(ms.edits[2].region), 4)
+	testing.expect(t, ms.edits[2].fit, "fit")
+	testing.expect_value(t, ms.edits[3].id, "e4") // e1 was taken, e2 and e3 too
+	testing.expect_value(t, len(warnings), 1)
+
+	// and it writes back the same
+	again := encode(back)
+	defer delete(again)
+	testing.expect(t, strings.count(again, "\"kind\"") == 4, "four edits")
 }

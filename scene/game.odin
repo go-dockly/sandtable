@@ -243,6 +243,7 @@ Export_Input :: struct {
 	id, title:    string,          // used when the base has none
 	source_level: string,          // the level, relative to the mission file
 	terrain_path: string,          // the capture, relative to the mission file
+	map_path:     string,          // the gameplay map, relative to the mission file; "" none
 }
 
 // The keys the game reads, in the order they are written; the base's other
@@ -341,6 +342,9 @@ export_mission :: proc(in_: Export_Input, allocator := context.allocator) -> (te
 			strings.write_string(&b, compact(base[k]) if k in base else "1")
 		case "terrain":
 			key(&b, &first, k); strings.write_string(&b, quote(in_.terrain_path))
+			if len(in_.map_path) > 0 {
+				key(&b, &first, "map"); strings.write_string(&b, quote(in_.map_path))
+			}
 		case "coordinateSpace":
 			key(&b, &first, k)
 			fmt.sbprintf(&b, `{{"width": %s, "height": %s, "origin": "top-left", "plane": "top-down"}}`,
@@ -374,7 +378,7 @@ export_mission :: proc(in_: Export_Input, allocator := context.allocator) -> (te
 	known := MISSION_KEYS
 	rest := make([dynamic]string)
 	outer: for k in base {
-		if k == "props" || k == "sandtable" do continue
+		if k == "props" || k == "sandtable" || (k == "map" && len(in_.map_path) > 0) do continue
 		for m in known do if m == k do continue outer
 		append(&rest, k)
 	}

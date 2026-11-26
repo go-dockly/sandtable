@@ -51,6 +51,9 @@ Terrain :: struct {
 	w, h:    int,    // cells along x and along z
 	ground:  []f32,  // w * h heights, index z * w + x
 	surface: []f32,
+	floor:   []f32,  // the lowest height a few splats agree on, before the
+	                 // ground filter: near the ground under a canopy, at the
+	                 // roof under a roof. The ground where there is no data
 	class:   []Class,
 	count:   []u32,  // splats binned per cell
 	lo, hi:  f32,    // lowest ground, highest surface
@@ -109,6 +112,7 @@ destroy :: proc(t: ^Terrain) {
 	if t == nil do return
 	delete(t.ground)
 	delete(t.surface)
+	delete(t.floor)
 	delete(t.class)
 	delete(t.count)
 	t^ = {}
@@ -292,6 +296,7 @@ build :: proc(pos: [][3]f32, opacity: []f32, params: Params) -> (t: Terrain, ok:
 
 	// ---- surface: the high quantile, the ground where there is no data -------
 	t.surface = make([]f32, cells)
+	t.floor = make([]f32, cells)
 	t.class = make([]Class, cells)
 	t.lo, t.hi = max(f32), -max(f32)
 	for c in 0 ..< cells {
@@ -299,6 +304,7 @@ build :: proc(pos: [][3]f32, opacity: []f32, params: Params) -> (t: Terrain, ok:
 		s := high[c] if has[c] else g
 		s = max(s, g)
 		t.surface[c] = s
+		t.floor[c] = clamp(low[c], g, s) if has[c] else g
 		switch {
 		case !has[c]:
 			t.class[c] = .Empty
