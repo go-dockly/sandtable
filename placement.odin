@@ -25,6 +25,7 @@ package main
 //   Delete / Bksp  delete the selected object
 //   Esc            stop placing / undo the move / deselect
 //   O              next loaded model for the selected object or the preview
+//   ctrl+Z         undo (cmd+Z on a Mac); ctrl+shift+Z or ctrl+Y: redo
 //   drop a .glb    load it and start placing it
 //
 // The keyboard edits the preview while placing, otherwise the selection:
@@ -430,6 +431,23 @@ ROTATE_STEP_COARSE :: f32(90)
 placement_keys :: proc(p: ^Placement, camera: rl.Camera3D, extent: f32, dt: f32, has_terrain: bool) {
 	shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 	ctrl := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
+	cmd := ctrl || rl.IsKeyDown(.LEFT_SUPER) || rl.IsKeyDown(.RIGHT_SUPER)
+
+	// ---- undo / redo ---------------------------------------------------------
+	if cmd && rl.IsKeyPressed(.Z) {
+		if shift {
+			editor.redo(&p.ed)
+		} else {
+			editor.undo(&p.ed)
+		}
+		p.hover = 0
+		return
+	}
+	if cmd && rl.IsKeyPressed(.Y) {
+		editor.redo(&p.ed)
+		p.hover = 0
+		return
+	}
 
 	// ---- editor actions --------------------------------------------------
 	if rl.IsKeyPressed(.A) && len(p.assets) > 0 {
@@ -460,6 +478,23 @@ placement_keys :: proc(p: ^Placement, camera: rl.Camera3D, extent: f32, dt: f32,
 	act := editor.active(&p.ed)
 	if act == nil do return
 
+	// An edit of an object in the level is an undo step, taken at the key
+	// press: holding a key for a second is one step. (The preview is not in
+	// the level: placing it is the step.)
+	if p.ed.mode != .Place && !cmd {
+		pressed := false
+		for k in ([?]rl.KeyboardKey{.I, .J, .K, .L, .Y, .H, .Z, .U, .COMMA, .PERIOD, .T, .O}) {
+			if rl.IsKeyPressed(k) do pressed = true
+		}
+		if !ctrl && (rl.IsKeyPressed(.N) || rl.IsKeyPressed(.M)) do pressed = true
+		if pressed {
+			editor.checkpoint(&p.ed)
+			act = editor.active(&p.ed)
+		}
+	}
+	// held keys below: none of them with ctrl / cmd, which belong to the
+	// shortcuts (ctrl+Y redo, ctrl+N/M world scale)
+
 	if rl.IsKeyPressed(.O) && len(p.assets) > 1 do act.asset = (act.asset + 1) % len(p.assets)
 
 	speed := extent * 0.1 * dt * (f32(5) if shift else f32(1))
@@ -482,14 +517,14 @@ placement_keys :: proc(p: ^Placement, camera: rl.Camera3D, extent: f32, dt: f32,
 	// correction, a few centimetres for a car's tyres)
 	if editor.snapped(act^, has_terrain) {
 		fine := speed * 0.1
-		if rl.IsKeyDown(.Y) do act.offset += fine
-		if rl.IsKeyDown(.H) do act.offset -= fine
+		if rl.IsKeyDown(.Y) && !cmd do act.offset += fine
+		if rl.IsKeyDown(.H) && !cmd do act.offset -= fine
 	} else {
-		if rl.IsKeyDown(.Y) do act.ground += speed
-		if rl.IsKeyDown(.H) do act.ground -= speed
+		if rl.IsKeyDown(.Y) && !cmd do act.ground += speed
+		if rl.IsKeyDown(.H) && !cmd do act.ground -= speed
 		act.transform.position.y = act.ground
 	}
-	if rl.IsKeyPressed(.Z) && !shift do act.snap = Snap((int(act.snap) + 1) % len(Snap))
+	if rl.IsKeyPressed(.Z) && !shift && !cmd do act.snap = Snap((int(act.snap) + 1) % len(Snap))
 	if rl.IsKeyPressed(.U) do act.align = !act.align
 
 	step := (ROTATE_STEP_COARSE if shift else ROTATE_STEP) * math.RAD_PER_DEG
@@ -497,7 +532,7 @@ placement_keys :: proc(p: ^Placement, camera: rl.Camera3D, extent: f32, dt: f32,
 	if rl.IsKeyPressed(.PERIOD) do act.transform.rotation.y -= step
 	act.transform.rotation.y = editor.wrap_yaw(act.transform.rotation.y)
 
-	if !ctrl do act.transform.scale *= factor
+	if !cmd do act.transform.scale *= factor
 
 	if rl.IsKeyPressed(.T) {
 		// the start transform and snap settings; the model stays

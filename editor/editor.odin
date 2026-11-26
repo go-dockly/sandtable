@@ -22,6 +22,8 @@ package editor
 //   Select --W--> Move  --click--> Select
 //                       --Esc----> Select (move undone)
 //   any    --Delete--> Select (selected instance removed)
+//
+// Every change to the level can be undone (history.odin).
 
 import "core:math"
 
@@ -67,16 +69,20 @@ Editor :: struct {
 	selected:  u64,      // 0: nothing selected
 	preview:   Instance, // Place: what a click commits
 	backup:    Instance, // Move: the selected instance before the move, for Esc
+	history:   History,  // undo / redo (history.odin)
 }
 
 destroy :: proc(e: ^Editor) {
 	delete(e.instances)
+	history_destroy(&e.history)
 	e^ = {}
 }
 
-// Empties the level (a new cloud is a new level). Ids keep counting up.
+// Empties the level (a new cloud is a new level), and its history. Ids keep
+// counting up.
 reset :: proc(e: ^Editor) {
 	clear(&e.instances)
+	history_reset(&e.history)
 	e.mode = .Select
 	e.selected = 0
 	e.preview = {}
@@ -160,10 +166,12 @@ begin_move :: proc(e: ^Editor) -> bool {
 commit :: proc(e: ^Editor) -> u64 {
 	switch e.mode {
 	case .Place:
+		checkpoint(e)
 		id := add(e, e.preview)
 		e.selected = id
 		return id
 	case .Move:
+		checkpoint_move(e)
 		e.mode = .Select
 		return e.selected
 	case .Select:
@@ -188,7 +196,8 @@ cancel :: proc(e: ^Editor) {
 // Placing goes on: Delete while placing removes the last one stamped.
 delete_selected :: proc(e: ^Editor) -> bool {
 	if e.selected == 0 do return false
-	if e.mode == .Move do e.mode = .Select
+	if e.mode == .Move do cancel(e) // the step to undo is the object where it was
+	checkpoint(e)
 	return remove(e, e.selected)
 }
 
