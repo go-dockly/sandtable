@@ -19,8 +19,9 @@ package main
 //   turn         the camera turning 6° a second: re-sorts as often as it can
 //
 // The camera ignores the mouse and keys while it runs. Every phase starts
-// with a second of warm-up that is not recorded. Frames
-// are timed with the wall clock, and the CPU sort on its own. The stats go
+// with a second of warm-up that is not recorded. Frames are timed with the
+// wall clock; the CPU sort, the characters' walk and sight (sim) and each
+// path search (replan) on their own, so a hitch can be put on one of them. The stats go
 // to the console and to `--bench-out` (default bench.json); then the window
 // closes.
 
@@ -83,6 +84,12 @@ Bench_Stats :: struct {
 	passes:      bool   `json:"passes60"`,   // p95 within 16.7 ms
 	sorts:       int    `json:"sorts"`,
 	sort_ms:     f64    `json:"sortMs"`,     // mean CPU time of one sort and its upload
+	sort_max_ms: f64    `json:"sortMaxMs"`,
+	sim_ms:      f64    `json:"simMs"`,      // mean per frame: walking, sight, replans
+	sim_max_ms:  f64    `json:"simMaxMs"`,
+	replans:     int    `json:"replans"`,
+	replan_ms:   f64    `json:"replanMs"`,   // mean of one path search
+	replan_max_ms: f64  `json:"replanMaxMs"`,
 	ss:          int    `json:"supersample"`,
 	splats:      int    `json:"splatsDrawn"`,
 }
@@ -97,6 +104,8 @@ Bench :: struct {
 	last:       time.Tick,
 	frames_ms:  [dynamic]f64,
 	sorts_ms:   [dynamic]f64,
+	sims_ms:    [dynamic]f64,
+	replans_ms: [dynamic]f64,
 	results:    [dynamic]Bench_Stats,
 	characters: [BENCH_CHARACTERS]Bench_Character,
 	start_target: [3]f32,
@@ -125,6 +134,14 @@ random_floor :: proc(m: ^gamemap.Map, seed: ^u64) -> ([3]f32, bool) {
 		if gamemap.standable(m, n, {radius = 0.4}) do return gamemap.node_point(m, n), true
 	}
 	return {}, false
+}
+
+// Times replan into b.replans_ms once the phase's warm-up is over.
+@(private = "file")
+replan_timed :: proc(b: ^Bench, c: ^Bench_Character, m: ^gamemap.Map, record: bool) {
+	t := time.tick_now()
+	replan(c, m)
+	if record do append(&b.replans_ms, time.duration_milliseconds(time.tick_since(t)))
 }
 
 @(private = "file")
@@ -199,7 +216,8 @@ bench_frame :: proc(b: ^Bench, wm: ^World_Map, iso: ^Iso, world_scale: f32) -> b
 	dt := time.duration_seconds(time.tick_diff(b.last, now))
 	b.last = now
 	in_phase := time.duration_seconds(time.tick_diff(b.phase_start, now))
-	if in_phase > BENCH_WARMUP do append(&b.frames_ms, dt * 1000)
+	record := in_phase > BENCH_WARMUP
+	if record do append(&b.frames_ms, dt * 1000)
 	if in_phase >= BENCH_WARMUP + bench_phase_seconds(b) {
 		bench_close_phase(b)
 		b.phase += 1
@@ -207,6 +225,7 @@ bench_frame :: proc(b: ^Bench, wm: ^World_Map, iso: ^Iso, world_scale: f32) -> b
 		b.phase_start = now
 		iso.target, iso.azimuth = b.start_target, b.start_azimuth
 		b.pan_t = 0
+		record = false
 	}
 
 	switch BENCH_PHASES[b.phase].motion {
@@ -224,10 +243,11 @@ bench_frame :: proc(b: ^Bench, wm: ^World_Map, iso: ^Iso, world_scale: f32) -> b
 		iso.target = b.start_target + right * (tri - 0.5) * BENCH_PAN * world_scale
 	}
 
+	t_sim := time.tick_now()
 	m := &wm.m
 	step := gamemap.DEFAULT_SPEED * f32(dt)
 	for &c in b.characters {
-		if c.index >= len(c.path) do replan(&c, m)
+		if c.index >= len(c.path) do replan_timed(b, &c, m, record)
 		left := step
 		for left > 0 && c.index < len(c.path) {
 			d := c.path[c.index] - c.pos
@@ -247,6 +267,7 @@ bench_frame :: proc(b: ^Bench, wm: ^World_Map, iso: ^Iso, world_scale: f32) -> b
 		b.sight_checks += 1
 		_ = gamemap.can_see_body(m, gamemap.eye_point(c.pos, .Standing), target, .Standing)
 	}
+	if record do append(&b.sims_ms, time.duration_milliseconds(time.tick_since(t_sim)))
 	return false
 }
 
@@ -272,17 +293,27 @@ bench_close_phase :: proc(b: ^Bench) {
 		st.over_budget = f64(over) / f64(len(ms))
 		st.passes = st.p95_ms <= BENCH_BUDGET_MS
 	}
-	if len(b.sorts_ms) > 0 {
-		sum := 0.0
-		for v in b.sorts_ms do sum += v
-		st.sorts = len(b.sorts_ms)
-		st.sort_ms = sum / f64(len(b.sorts_ms))
+	mean_max :: proc(v: []f64) -> (mean, top: f64) {
+		if len(v) == 0 do return
+		for x in v {
+			mean += x
+			top = max(top, x)
+		}
+		return mean / f64(len(v)), top
 	}
+	st.sorts = len(b.sorts_ms)
+	st.sort_ms, st.sort_max_ms = mean_max(b.sorts_ms[:])
+	st.sim_ms, st.sim_max_ms = mean_max(b.sims_ms[:])
+	st.replans = len(b.replans_ms)
+	st.replan_ms, st.replan_max_ms = mean_max(b.replans_ms[:])
 	append(&b.results, st)
 	clear(&b.frames_ms)
 	clear(&b.sorts_ms)
-	fmt.printfln("bench: %-18s %5d frames  mean %6.2f ms (%3.0f fps)  p50 %6.2f  p95 %6.2f  p99 %6.2f  max %7.2f  | %4d sorts of %6.2f ms | %s",
-		st.name, st.frames, st.mean_ms, st.mean_fps, st.p50_ms, st.p95_ms, st.p99_ms, st.max_ms, st.sorts, st.sort_ms,
+	clear(&b.sims_ms)
+	clear(&b.replans_ms)
+	fmt.printfln("bench: %-18s %5d frames  mean %6.2f ms (%3.0f fps)  p50 %6.2f  p95 %6.2f  p99 %6.2f  max %7.2f  | %4d sorts of %6.2f ms (max %.2f) | sim %.2f ms (max %.2f), %d replans of %.2f ms (max %.2f) | %s",
+		st.name, st.frames, st.mean_ms, st.mean_fps, st.p50_ms, st.p95_ms, st.p99_ms, st.max_ms, st.sorts, st.sort_ms, st.sort_max_ms,
+		st.sim_ms, st.sim_max_ms, st.replans, st.replan_ms, st.replan_max_ms,
 		"60 fps holds" if st.passes else "under 60 fps")
 }
 
@@ -337,5 +368,7 @@ bench_destroy :: proc(b: ^Bench) {
 	for &c in b.characters do delete(c.path)
 	delete(b.frames_ms)
 	delete(b.sorts_ms)
+	delete(b.sims_ms)
+	delete(b.replans_ms)
 	delete(b.results)
 }

@@ -268,7 +268,7 @@ The window renders the level uncapped, vsync off, in the game camera, with 10 ca
 | `pan (follow)` | the camera follows a running commando | the game's case |
 | `turn` | the camera turns 6° a second | re-sorting as often as it happens |
 
-Each phase gets a second of warm-up that is not recorded; frames are timed with the wall clock, the CPU sort and its upload on their own. A line per phase goes to the console (mean, p50, p95, p99, max ms, sorts and their mean ms, whether p95 is within 16.7 ms) and everything to `bench.json` (`--bench-out` for another path). Run it at the window size and `ss` you mean to ship, `-o:speed` always.
+Each phase gets a second of warm-up that is not recorded; frames are timed with the wall clock, the CPU sort and its upload, the characters' walk and sight, and each path search on their own. A line per phase goes to the console (mean, p50, p95, p99, max ms, sorts and their mean and max ms, the simulation's mean and max ms per frame, path replans and their mean and max ms, whether p95 is within 16.7 ms) and everything to `bench.json` (`--bench-out` for another path). Run it at the window size and `ss` you mean to ship, `-o:speed` always.
 
 In the game camera only the splats that reach the view, plus a margin of 30% on each side, are sorted and drawn (`splatsort/`, on every core). A pan does not change an orthographic view's order, so the camera re-sorts only after panning through half that margin, or zooming; turning re-sorts every 1.8°.
 
@@ -294,9 +294,16 @@ The object stands on the plane fitted through 5×5 terrain samples under its foo
 | `krakow.ground.pgm` | ground, 16 bit, 0..65535 = `heightMin`..`heightMax` |
 | `krakow.surface.pgm` | surface, same scale |
 | `krakow.class.pgm` | 8 bit: 0 empty, 85 ground, 170 object, 255 structure |
+| `krakow.floor.pgm` | the low layer before the ground filter (what the filter saw; at the roof under a roof), same scale as ground |
 | `krakow.terrain.json` | origin (world x, z of the corner of cell (0, 0)), cell size, grid size, height range, world scale, build parameters |
 
-Row 0 is the lowest z, column 0 the lowest x; heights are world units (divide by `worldScale` for metres).
+Row 0 is the lowest z, column 0 the lowest x; heights are world units (divide by `worldScale` for metres). The folder is made if missing. `terrain.load_export` reads an export back, and `tools/mapgen_check` builds the gameplay map from one without the capture:
+
+```sh
+odin run tools/mapgen_check -collection:cmd=../commandos -collection:st=. -- out/krakow.terrain.json levels/krakow.json
+```
+
+It prints the classes, ground / floor / surface along five rows, the map's stats and features, and writes `out/krakow.check.map.json` (+ `.bin`) and `out/krakow.check.ppm`, a picture of the map.
 
 Limits: one height per x/z, so walls are steps between cells and bridges, overhangs and interiors are not represented. Flat roofs wider than 40 m count as ground. The ground under a parked car is only as good as the street splats around it.
 
@@ -312,6 +319,7 @@ The parts that can be tested without a window are packages without raylib; the r
 | `splatsort/` | the splats' back-to-front order on every core, and culling to the game camera's view | `odin test splatsort` |
 | `mapgen/` | the automatic gameplay map from the terrain proxy: alignment, structures to buildings, trees and walls, props, ground; feature ids and retargeting edits | `odin test mapgen -collection:cmd=../commandos` |
 | `../commandos/gamemap/` | the gameplay map itself, shared with the game: format, layered A*, sight, edits | `cd ../commandos && odin test gamemap` |
+| `tools/mapgen_check/` | the gameplay map from a terrain export alone: diagnostics, map files, a picture | `odin run tools/mapgen_check -collection:cmd=../commandos -collection:st=. -- out/x.terrain.json [level.json]` |
 | `tools/commandos_check/` | an export through commandos' own loader, collision and A*; and the gameplay map end to end: mapgen, edits, the map files, a mission in map metres, played by commandos | `odin run tools/commandos_check -collection:cmd=../commandos -collection:st=.` |
 
 | App file | Does | From |
@@ -331,10 +339,10 @@ The parts that can be tested without a window are packages without raylib; the r
 ## Tests
 
 ```
-odin test terrain     # 9: a synthetic street with a slope, a building with no ground under it, a tree, a car, haze, sky blobs, at Krakow's scale too
+odin test terrain     # 10: a synthetic street with a slope, a building with no ground under it, a tree, a car, haze, sky blobs, at Krakow's scale too; export and load_export round trip
 odin test editor      # 16: rays through both cameras, picking, cursor on street and roof, modes, ids, undo / redo, settling
 odin test scene -collection:cmd=../commandos    # 15: level round trip, repairs, paths, the map section, the export's buildings, footprints and merge
-odin test mapgen -collection:cmd=../commandos   # 7: a turned synthetic town at Krakow's scale: alignment, buildings, a courtyard, a tree, walls high and low, edits, ids, at 1 and 0.5 m
+odin test mapgen -collection:cmd=../commandos   # 9: a turned synthetic town at Krakow's scale: alignment, buildings, a courtyard, a tree, walls high and low, edits, ids, at 1 and 0.5 m
 (cd ../commandos && odin test gamemap)         # 14: movement, ledges, ladders and roofs, links and abilities, sight by stance, cones, edits, files, speed
 odin run tools/commandos_check -collection:cmd=../commandos -collection:st=.   # 27 checks in the game's own code
 ```

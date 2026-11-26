@@ -379,6 +379,9 @@ main :: proc() {
 		// shifts by the same amount. But the game camera sorts only the
 		// splats that reach its view and a margin around it (CULL_MARGIN), so
 		// it re-sorts when it has panned through half that margin, or zoomed.
+		// Its position is not a trigger: turning swings the position round
+		// the target, and the direction already covers that (one sort per
+		// ~1.8°), while the position alone re-sorted every few frames.
 		fwd := linalg.normalize(camera.target - camera.position)
 		cull: splatsort.Cull
 		resort_move := 0.01 * view.extent
@@ -394,7 +397,7 @@ main :: proc() {
 		if view.count > 0 &&
 		   (linalg.dot(fwd, last_fwd) < 0.9995 || zoomed ||
 			linalg.vector_length(camera.target - last_target) > resort_move ||
-			linalg.vector_length(camera.position - last_pos) > (resort_move if game_cam else 0.01 * view.extent)) {
+			(!game_cam && linalg.vector_length(camera.position - last_pos) > resort_move)) {
 			t_sort := time.tick_now()
 			sort_order(&view, camera.position, fwd, far, cull)
 			rl.UpdateTexture(view.order_tex, raw_data(view.order_px))

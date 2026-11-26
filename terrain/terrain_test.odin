@@ -311,7 +311,7 @@ export_writes_files :: proc(t: ^testing.T) {
 	header := strings.concatenate({"P5\n", fmt_int(ter.w), " ", fmt_int(ter.h), "\n65535\n"}, context.temp_allocator)
 	testing.expect(t, strings.has_prefix(string(data), header))
 	testing.expect_value(t, len(data), len(header) + ter.w * ter.h * 2)
-	json, jerr := os.read_entire_file(names[3], context.allocator)
+	json, jerr := os.read_entire_file(names[4], context.allocator)
 	testing.expect_value(t, jerr, nil)
 	defer delete(json)
 	testing.expect(t, strings.contains(string(json), `"ground": "sandtable_terrain_test.ground.pgm"`))
@@ -333,4 +333,41 @@ fmt_int :: proc(n: int) -> string {
 angle :: proc(a, b: [3]f32) -> f32 {
 	d := clamp(a.x * b.x + a.y * b.y + a.z * b.z, -1, 1)
 	return math.acos(d) * math.DEG_PER_RAD
+}
+
+@(test)
+load_export_round_trip :: proc(t: ^testing.T) {
+	ter := build_scene(t, 1)
+	defer destroy(&ter)
+	prefix := "/tmp/sandtable_terrain_load/sub/scene" // the folder is made
+	os.remove_all("/tmp/sandtable_terrain_load")
+	defer os.remove_all("/tmp/sandtable_terrain_load")
+	names, err := export(ter, prefix, 0.005)
+	testing.expect_value(t, err, nil)
+	defer for s in names do delete(s)
+
+	got, ws, lerr := load_export(names[4])
+	defer destroy(&got)
+	testing.expect_value(t, lerr, Load_Error.None)
+	testing.expect_value(t, ws, f32(0.005))
+	testing.expect_value(t, got.w, ter.w)
+	testing.expect_value(t, got.h, ter.h)
+	testing.expect_value(t, got.origin, ter.origin)
+	testing.expect_value(t, got.cell, ter.cell)
+	testing.expect_value(t, got.params.structure_height, ter.params.structure_height)
+	// quantised to 1/65535 of the range
+	tol := (ter.hi - ter.lo) / 65535 + 1e-6
+	worst: f32
+	for i in 0 ..< ter.w * ter.h {
+		worst = max(worst, abs(got.ground[i] - ter.ground[i]), abs(got.surface[i] - ter.surface[i]), abs(got.floor[i] - ter.floor[i]))
+		if got.class[i] != ter.class[i] {
+			testing.expectf(t, false, "class at %d: %v, want %v", i, got.class[i], ter.class[i])
+			return
+		}
+	}
+	testing.expectf(t, worst <= tol, "heights within %v: %v", tol, worst)
+	testing.expect_value(t, got.stats.structure_cells, ter.stats.structure_cells)
+
+	_, _, merr := load_export("/tmp/sandtable_terrain_load/none.terrain.json")
+	testing.expect_value(t, merr, Load_Error.Read)
 }

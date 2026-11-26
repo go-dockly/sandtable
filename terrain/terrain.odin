@@ -27,6 +27,7 @@ package terrain
 // No raylib in here, so the package can be tested on its own:
 //   odin test terrain
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:math"
 import "core:os"
@@ -713,19 +714,29 @@ finite :: #force_inline proc(x: f32) -> bool {
 //   <prefix>.ground.pgm    DTM, 16 bit, 0..65535 = heightMin..heightMax
 //   <prefix>.surface.pgm   DSM, same scale
 //   <prefix>.class.pgm     8 bit: 0 empty, 85 ground, 170 object, 255 structure
+//   <prefix>.floor.pgm     the low layer before the ground filter, same scale
+//                          as ground: what the filter saw
 //   <prefix>.terrain.json  grid placement, height range, world scale
+//
+// The prefix's folder is made if missing. load_export reads the files back.
 //
 // Row 0 is the lowest z, column 0 the lowest x. A cell's world height is
 // heightMin + value / 65535 * (heightMax - heightMin); divide by worldScale
 // for metres.
 // ---------------------------------------------------------------------------
 
-export :: proc(t: Terrain, prefix: string, world_scale: f32) -> (written: [4]string, err: os.Error) {
+EXPORT_FILES :: 5
+
+export :: proc(t: Terrain, prefix: string, world_scale: f32) -> (written: [EXPORT_FILES]string, err: os.Error) {
 	if !valid(t) do return {}, .Invalid_File
-	names := [4]string{
+	if folder := os.dir(prefix); folder != "" && folder != "." && !os.is_directory(folder) {
+		os.make_directory_all(folder) or_return
+	}
+	names := [EXPORT_FILES]string{
 		fmt.aprintf("%s.ground.pgm", prefix),
 		fmt.aprintf("%s.surface.pgm", prefix),
 		fmt.aprintf("%s.class.pgm", prefix),
+		fmt.aprintf("%s.floor.pgm", prefix),
 		fmt.aprintf("%s.terrain.json", prefix),
 	}
 	defer if err != nil {
@@ -749,6 +760,8 @@ export :: proc(t: Terrain, prefix: string, world_scale: f32) -> (written: [4]str
 	}
 	write_pgm16(names[0], t.ground, t.w, t.h, lo, hi) or_return
 	write_pgm16(names[1], t.surface, t.w, t.h, lo, hi) or_return
+	// a terrain built before the floor layer existed: the ground stands in
+	write_pgm16(names[3], t.floor if len(t.floor) == len(t.ground) else t.ground, t.w, t.h, lo, hi) or_return
 	{
 		header := fmt.tprintf("P5\n%d %d\n255\n", t.w, t.h)
 		buf := make([]u8, len(header) + t.w * t.h)
@@ -779,6 +792,7 @@ export :: proc(t: Terrain, prefix: string, world_scale: f32) -> (written: [4]str
   "ground": %q,
   "surface": %q,
   "class": %q,
+  "floor": %q,
   "classes": {{"0": "empty", "85": "ground", "170": "object", "255": "structure"}},
   "params": {{
     "minOpacity": %.9g, "minCount": %d,
@@ -789,10 +803,146 @@ export :: proc(t: Terrain, prefix: string, world_scale: f32) -> (written: [4]str
 }}
 `,
 		world_scale, t.origin.x, t.origin.y, t.cell, t.w, t.h, lo, hi,
-		base(names[0]), base(names[1]), base(names[2]),
+		base(names[0]), base(names[1]), base(names[2]), base(names[3]),
 		p.min_opacity, p.min_count, p.ground_quantile, p.surface_quantile,
 		p.max_object, p.slope, p.dh0, p.dh_max, p.object_height, p.structure_height, p.smooth,
 	)
-	os.write_entire_file(names[3], json) or_return
+	os.write_entire_file(names[4], json) or_return
 	return names, nil
+}
+
+// Export_Header is <prefix>.terrain.json as export writes it.
+Export_Header :: struct {
+	version:     int,
+	world_scale: f32 `json:"worldScale"`,
+	origin:      [2]f32,
+	cell:        f32,
+	width:       int,
+	height:      int,
+	height_min:  f32 `json:"heightMin"`,
+	height_max:  f32 `json:"heightMax"`,
+	ground:      string,
+	surface:     string,
+	class:       string,
+	floor:       string, // "" in exports made before the floor layer
+	params:      struct {
+		min_opacity:      f32 `json:"minOpacity"`,
+		min_count:        int `json:"minCount"`,
+		ground_quantile:  f32 `json:"groundQuantile"`,
+		surface_quantile: f32 `json:"surfaceQuantile"`,
+		max_object:       f32 `json:"maxObject"`,
+		slope:            f32,
+		dh0:              f32,
+		dh_max:           f32 `json:"dhMax"`,
+		object_height:    f32 `json:"objectHeight"`,
+		structure_height: f32 `json:"structureHeight"`,
+		smooth:           int,
+	},
+}
+
+Load_Error :: enum {
+	None,
+	Read,   // a file is missing or unreadable
+	Header, // the JSON does not parse or describes no grid
+	Image,  // a PGM is not the size or depth the JSON says
+}
+
+// Reads an export back (export's <prefix>.terrain.json and the images it
+// names, next to it), so mapgen can run without the capture: on a machine
+// without the splats, or in a test. Heights come back quantised to 1/65535
+// of the height range (under a millimetre for a town). count stays empty.
+// Without a floor image (older exports) the floor is the ground.
+load_export :: proc(json_path: string, allocator := context.allocator) -> (t: Terrain, world_scale: f32, err: Load_Error) {
+	context.allocator = allocator
+	data, rerr := os.read_entire_file(json_path, context.temp_allocator)
+	if rerr != nil do return {}, 0, .Read
+	hd: Export_Header
+	if json.unmarshal(data, &hd, json.DEFAULT_SPECIFICATION, context.temp_allocator) != nil do return {}, 0, .Header
+	if hd.width <= 0 || hd.height <= 0 || hd.cell <= 0 || len(hd.ground) == 0 || len(hd.surface) == 0 || len(hd.class) == 0 {
+		return {}, 0, .Header
+	}
+	folder := os.dir(json_path)
+	beside :: proc(folder, name: string) -> string {
+		if folder == "" || folder == "." do return name
+		return strings.concatenate({folder, "/", name}, context.temp_allocator)
+	}
+
+	w, h := hd.width, hd.height
+	cells := w * h
+	t.origin, t.cell, t.w, t.h = hd.origin, hd.cell, w, h
+	t.lo, t.hi = hd.height_min, hd.height_max
+	pp := hd.params
+	t.params = Params{
+		cell = hd.cell, min_opacity = pp.min_opacity, min_count = pp.min_count,
+		ground_quantile = pp.ground_quantile, surface_quantile = pp.surface_quantile,
+		max_object = pp.max_object, slope = pp.slope, dh0 = pp.dh0, dh_max = pp.dh_max,
+		object_height = pp.object_height, structure_height = pp.structure_height, smooth = pp.smooth,
+	}
+	t.ground = make([]f32, cells)
+	t.surface = make([]f32, cells)
+	t.floor = make([]f32, cells)
+	t.class = make([]Class, cells)
+	defer if err != .None do destroy(&t)
+
+	read_pgm(beside(folder, hd.ground), t.ground, nil, w, h, t.lo, t.hi) or_return
+	read_pgm(beside(folder, hd.surface), t.surface, nil, w, h, t.lo, t.hi) or_return
+	if len(hd.floor) > 0 {
+		read_pgm(beside(folder, hd.floor), t.floor, nil, w, h, t.lo, t.hi) or_return
+	} else {
+		copy(t.floor, t.ground)
+	}
+	read_pgm(beside(folder, hd.class), nil, t.class, w, h, 0, 0) or_return
+
+	for c in t.class {
+		switch c {
+		case .Empty:
+		case .Ground:    t.stats.ground_cells += 1
+		case .Object:    t.stats.object_cells += 1
+		case .Structure: t.stats.structure_cells += 1
+		}
+		if c != .Empty do t.stats.data_cells += 1
+	}
+	return t, hd.world_scale, .None
+}
+
+// One binary PGM as export writes it: 16 bit heights into `heights`, or
+// 8 bit classes (0, 85, 170, 255) into `class`.
+@(private = "file")
+read_pgm :: proc(path: string, heights: []f32, class: []Class, w, h: int, lo, hi: f32) -> Load_Error {
+	data, rerr := os.read_entire_file(path, context.temp_allocator)
+	if rerr != nil do return .Read
+	is_space :: proc(b: u8) -> bool {return b == ' ' || b == '\n' || b == '\r' || b == '\t'}
+	parse :: proc(s: string) -> int {
+		n := 0
+		for ch in transmute([]u8)s {
+			if ch < '0' || ch > '9' do return -1
+			n = n * 10 + int(ch - '0')
+		}
+		return n if len(s) > 0 else -1
+	}
+	// header: "P5", width, height, maxval, each after whitespace, then one
+	// whitespace byte before the pixels
+	fields: [4]string
+	at := 0
+	for k in 0 ..< 4 {
+		for at < len(data) && is_space(data[at]) do at += 1
+		start := at
+		for at < len(data) && !is_space(data[at]) do at += 1
+		fields[k] = string(data[start:at])
+	}
+	at += 1
+	if fields[0] != "P5" || parse(fields[1]) != w || parse(fields[2]) != h do return .Image
+	maxval := parse(fields[3])
+	if heights != nil {
+		if maxval != 65535 || len(data) - at < w * h * 2 do return .Image
+		scale := (hi - lo) / 65535
+		for i in 0 ..< w * h {
+			q := u16(data[at + 2 * i]) << 8 | u16(data[at + 2 * i + 1])
+			heights[i] = lo + f32(q) * scale
+		}
+	} else {
+		if maxval != 255 || len(data) - at < w * h do return .Image
+		for i in 0 ..< w * h do class[i] = Class(min(int(data[at + i]) / 85, int(max(Class))))
+	}
+	return .None
 }
