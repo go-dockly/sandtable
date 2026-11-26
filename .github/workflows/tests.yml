@@ -41,6 +41,7 @@ jobs:
           odin check editor -no-entry-point -vet -strict-style
           odin check scene -no-entry-point -vet -strict-style -collection:cmd=../commandos
           odin check mapgen -no-entry-point -vet -strict-style -collection:cmd=../commandos
+          odin check splatsort -no-entry-point -vet -strict-style
 
       - name: terrain
         working-directory: sandtable
@@ -57,6 +58,10 @@ jobs:
       - name: gamemap (commandos)
         working-directory: commandos
         run: odin test gamemap
+
+      - name: splatsort
+        working-directory: sandtable
+        run: odin test splatsort
 
       - name: mapgen
         working-directory: sandtable

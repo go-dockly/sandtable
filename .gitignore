@@ -5,3 +5,4 @@ sandtable.exe
 models/
 *.autosave.json
 *.json.tmp
+bench.json

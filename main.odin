@@ -31,12 +31,14 @@ import "core:math"
 import "core:math/linalg"
 import "core:os"
 import "core:strings"
+import "core:time"
 
 import rl "vendor:raylib"
 import rlgl "vendor:raylib/rlgl"
 
 import "editor"
 import "scene"
+import "splatsort"
 
 BACKGROUND :: [4]u8{16, 14, 20, 255}
 
@@ -61,6 +63,11 @@ apply_palette :: proc(post: ^Post, mode: Palette_Mode, v: Splat_View, model_colo
 // Ortho depth is linear, so wide planes cost no precision. The perspective path
 // keeps the original viewer's near/far, with a near plane that scales with the
 // cloud so crisp depth testing has some precision to work with.
+// How far past the game camera's view the splats are still sorted and
+// drawn, as a share of its half width and height: room to pan before the
+// next sort.
+CULL_MARGIN :: f32(0.3)
+
 clip_planes :: proc(extent: f32, ortho: bool, iso_distance: f32) -> (near, far: f32) {
 	if ortho {
 		return max(iso_distance - extent * 4, extent * 0.01), iso_distance + extent * 4
@@ -187,21 +194,25 @@ main :: proc() {
 
 	last_fwd: [3]f32
 	last_pos: [3]f32
+	last_target: [3]f32
+	last_fovy: f32
 
 	// the speed test: uncapped, on the gameplay map
 	bench := Bench{seconds = opts.bench, out = opts.bench_out}
 	defer bench_destroy(&bench)
-	bench_art: [2]i32
 	if bench.seconds > 0 {
 		rl.ClearWindowState({.VSYNC_HINT})
 		rl.SetTargetFPS(0)
+		game_cam = true
 		world_map_build(&game_map, &lv, &placement, ground_proxy, model_shader.shader)
-		bench_start(&bench, &game_map)
-		fmt.printfln("bench: %.0f s after %.0f s of warm-up%s", bench.seconds, BENCH_WARMUP, "" if bench.ok else fmt.tprintf(": cannot start, %s", bench.note))
+		bench_start(&bench, &game_map, iso, int(cfg.ss), int(view.count))
+		fmt.printfln("bench: %d phases of %.0f s, each after %.0f s of warm-up%s", len(BENCH_PHASES), bench_phase_seconds(&bench), BENCH_WARMUP,
+			"" if bench.ok else fmt.tprintf(": cannot start, %s", bench.note))
 	}
 
 	for !rl.WindowShouldClose() {
-		if bench.seconds > 0 && bench_frame(&bench, &game_map, &iso, rl.GetFrameTime()) do break
+		if bench.seconds > 0 && bench_frame(&bench, &game_map, &iso, placement.world_scale) do break
+		if bench.ok do cfg.ss = type_of(cfg.ss)(bench_ss(&bench))
 		// ---- input ---------------------------------------------------------
 		if rl.IsFileDropped() {
 			files := rl.LoadDroppedFiles()
@@ -316,7 +327,7 @@ main :: proc() {
 		pixel_size = clamp(pixel_size, PIXEL_SIZE_MIN, PIXEL_SIZE_MAX)
 		art_w, art_h := art_size(rl.GetScreenWidth(), rl.GetScreenHeight(), pixel_size)
 		targets_resize(&targets, art_w, art_h)
-		bench_art = {art_w, art_h}
+		bench.art = {art_w, art_h}
 
 		// ---- camera ----------------------------------------------------------
 		// a left press only turns the camera once it is a drag, so a click
@@ -324,7 +335,8 @@ main :: proc() {
 		left_drag := placement.click.dragged
 		camera: rl.Camera3D
 		if game_cam {
-			iso_update(&iso, f32(art_h * pixel_size), left_drag)
+			// the bench drives the camera itself: input would skew its phases
+			if !bench.ok do iso_update(&iso, f32(art_h * pixel_size), left_drag)
 			camera = iso_camera(iso)
 		} else {
 			update_orbit(&free_cam, left_drag)
@@ -362,13 +374,32 @@ main :: proc() {
 		}
 		dirty := level_dirty(&lv, &placement, cloud_path, ground_proxy.cell_m)
 
+		// Re-sort when the view turns. A move only changes the order through
+		// perspective: in the orthographic game camera every splat's depth
+		// shifts by the same amount. But the game camera sorts only the
+		// splats that reach its view and a margin around it (CULL_MARGIN), so
+		// it re-sorts when it has panned through half that margin, or zoomed.
 		fwd := linalg.normalize(camera.target - camera.position)
+		cull: splatsort.Cull
+		resort_move := 0.01 * view.extent
+		if game_cam {
+			half_h := camera.fovy * 0.5
+			half := [2]f32{half_h * aspect, half_h}
+			right := linalg.normalize(linalg.cross(fwd, [3]f32{0, 1, 0}))
+			up := linalg.cross(right, fwd)
+			cull = {enabled = true, centre = camera.target, right = right, up = up, half = half * (1 + CULL_MARGIN)}
+			resort_move = 0.5 * CULL_MARGIN * min(half.x, half.y)
+		}
+		zoomed := game_cam && abs(camera.fovy - last_fovy) > 0.02 * camera.fovy
 		if view.count > 0 &&
-		   (linalg.dot(fwd, last_fwd) < 0.9995 ||
-			linalg.vector_length(camera.position - last_pos) > 0.01 * view.extent) {
-			sort_order(&view, camera.position, fwd, far)
+		   (linalg.dot(fwd, last_fwd) < 0.9995 || zoomed ||
+			linalg.vector_length(camera.target - last_target) > resort_move ||
+			linalg.vector_length(camera.position - last_pos) > (resort_move if game_cam else 0.01 * view.extent)) {
+			t_sort := time.tick_now()
+			sort_order(&view, camera.position, fwd, far, cull)
 			rl.UpdateTexture(view.order_tex, raw_data(view.order_px))
-			last_fwd, last_pos = fwd, camera.position
+			bench_sorted(&bench, time.duration_milliseconds(time.tick_since(t_sort)))
+			last_fwd, last_pos, last_target, last_fovy = fwd, camera.position, camera.target, camera.fovy
 		}
 
 		// ---- pass 1: objects + splats into a transparent, premultiplied target
@@ -393,7 +424,9 @@ main :: proc() {
 			if bench.ok do bench_draw(&bench, &game_map)
 			if show_splats {
 				splat_set_frame(&splat, view_m, proj_m, rw, rh, game_cam, cfg.crisp, crisp_alpha)
-				splat_draw(&splat, view, cfg.crisp)
+				drawn := view
+				if bench.ok do drawn.visible = bench_visible(&bench, view.visible)
+				splat_draw(&splat, drawn, cfg.crisp)
 			}
 			rl.EndMode3D()
 		}
@@ -454,7 +487,7 @@ main :: proc() {
 		free_all(context.temp_allocator)
 	}
 
-	if bench.seconds > 0 do bench_report(&bench, &game_map, int(view.count), bench_art, int(cfg.ss))
+	if bench.seconds > 0 do bench_report(&bench, &game_map)
 
 	// closing with unsaved changes: keep them next to the level
 	level_autosave(&lv, &placement, cloud_path, ground_proxy.cell_m, iso)

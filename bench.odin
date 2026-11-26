@@ -5,33 +5,63 @@ package main
 //
 //   odin run . -o:speed -collection:cmd=../commandos -- levels/krakow.json --bench 30
 //
-// For `--bench` seconds the window renders the level as the game would: the
-// splats through the pixel-art pass, with the camera turning slowly the whole
-// time (the worst case: the splats are re-sorted every frame, as when the
-// camera follows a moving commando), and 10 characters walking the gameplay
-// map. Each frame every character walks its gamemap path and checks
-// can_see_body against the first, so the game's sight and movement cost is
-// in the frame too. Characters are capsules 1.8 m tall: a stand-in for
-// whatever the game draws them with.
+// The window renders the level as the game would, uncapped and without
+// vsync, with 10 characters walking the gameplay map (9 of them checking
+// can_see_body against the first every frame, so the game's sight and
+// movement cost is in the frame too; capsules 1.8 m tall stand in for
+// whatever the game draws them with). The time is split into phases that
+// each change one thing, so the stats say where a frame goes:
 //
-// The frame rate is not capped. After the first second (warm-up), every
-// frame's time is recorded; at the end the stats go to the console and to
-// `--bench-out` (default bench.json), and the window closes.
+//   still        camera still: no sorting, the draw and the post pass alone
+//   still ss1    the same at supersampling 1: how much is fill rate
+//   still half   the same drawing half the splats: how much is per splat
+//   pan          the camera following a running commando: the game's case
+//   turn         the camera turning 6° a second: re-sorts as often as it can
+//
+// The camera ignores the mouse and keys while it runs. Every phase starts
+// with a second of warm-up that is not recorded. Frames
+// are timed with the wall clock, and the CPU sort on its own. The stats go
+// to the console and to `--bench-out` (default bench.json); then the window
+// closes.
 
 import "core:encoding/json"
 import "core:fmt"
 import "core:math"
 import "core:os"
 import "core:slice"
+import "core:time"
 
 import rl "vendor:raylib"
 
 import "cmd:gamemap"
 
 BENCH_CHARACTERS :: 10
-BENCH_WARMUP     :: f32(1)  // seconds not recorded
-BENCH_TURN       :: f32(6)  // degrees per second the camera turns
+BENCH_WARMUP     :: f64(1)    // seconds per phase, not recorded
+BENCH_TURN       :: f32(6)    // degrees per second the camera turns
+BENCH_RUN        :: f32(5)    // metres per second the panning camera moves: a running commando
+BENCH_PAN        :: f32(25)   // metres it pans to and fro
 BENCH_BUDGET_MS  :: 1000.0 / 60
+
+Bench_Motion :: enum {
+	Still,
+	Pan,
+	Turn,
+}
+
+Bench_Phase :: struct {
+	name:     string,
+	motion:   Bench_Motion,
+	ss:       int, // 0: as set
+	fraction: f32, // of the splats drawn
+}
+
+BENCH_PHASES := [?]Bench_Phase{
+	{"still", .Still, 0, 1},
+	{"still ss1", .Still, 1, 1},
+	{"still half splats", .Still, 0, 0.5},
+	{"pan (follow)", .Pan, 0, 1},
+	{"turn", .Turn, 0, 1},
+}
 
 Bench_Character :: struct {
 	path:  [][3]f32, // map metres
@@ -40,16 +70,42 @@ Bench_Character :: struct {
 	seed:  u64,
 }
 
+Bench_Stats :: struct {
+	name:        string `json:"name"`,
+	frames:      int    `json:"frames"`,
+	mean_ms:     f64    `json:"meanMs"`,
+	p50_ms:      f64    `json:"p50Ms"`,
+	p95_ms:      f64    `json:"p95Ms"`,
+	p99_ms:      f64    `json:"p99Ms"`,
+	max_ms:      f64    `json:"maxMs"`,
+	mean_fps:    f64    `json:"meanFps"`,
+	over_budget: f64    `json:"overBudget"`, // share of frames over 16.7 ms
+	passes:      bool   `json:"passes60"`,   // p95 within 16.7 ms
+	sorts:       int    `json:"sorts"`,
+	sort_ms:     f64    `json:"sortMs"`,     // mean CPU time of one sort and its upload
+	ss:          int    `json:"supersample"`,
+	splats:      int    `json:"splatsDrawn"`,
+}
+
 Bench :: struct {
-	seconds:    f32,
+	seconds:    f32, // in all
 	out:        string,
 	ok:         bool,
-	elapsed:    f32,
-	frames_ms:  [dynamic]f64,
-	characters: [BENCH_CHARACTERS]Bench_Character,
-	sight_checks: int,
-	seen:       int,
 	note:       string, // why it could not start
+	phase:      int,
+	phase_start: time.Tick,
+	last:       time.Tick,
+	frames_ms:  [dynamic]f64,
+	sorts_ms:   [dynamic]f64,
+	results:    [dynamic]Bench_Stats,
+	characters: [BENCH_CHARACTERS]Bench_Character,
+	start_target: [3]f32,
+	start_azimuth: f32,
+	pan_t:      f32,
+	ss_set:     int, // supersampling as the user set it
+	splats:     int,
+	art:        [2]i32,
+	sight_checks: int,
 }
 
 // A deterministic stream of numbers: the same level, the same walk.
@@ -90,7 +146,7 @@ replan :: proc(c: ^Bench_Character, m: ^gamemap.Map) {
 }
 
 // Puts the characters on the map. The map must be built.
-bench_start :: proc(b: ^Bench, wm: ^World_Map) {
+bench_start :: proc(b: ^Bench, wm: ^World_Map, iso: Iso, ss, splats: int) {
 	if !wm.ok {
 		b.note = "no gameplay map (the level needs a terrain)"
 		return
@@ -106,19 +162,70 @@ bench_start :: proc(b: ^Bench, wm: ^World_Map) {
 		c.pos = pos
 		replan(&c, m)
 	}
+	b.start_target, b.start_azimuth = iso.target, iso.azimuth
+	b.ss_set, b.splats = ss, splats
+	b.phase_start = time.tick_now()
+	b.last = b.phase_start
 	b.ok = true
 }
 
-// One frame: records its time, turns the camera, walks the characters and
-// checks their sight. true when the test is over.
-bench_frame :: proc(b: ^Bench, wm: ^World_Map, iso: ^Iso, dt: f32) -> bool {
+bench_phase_seconds :: proc(b: ^Bench) -> f64 {
+	return f64(b.seconds) / len(BENCH_PHASES)
+}
+
+// The current phase's supersampling.
+bench_ss :: proc(b: ^Bench) -> int {
+	ph := BENCH_PHASES[b.phase]
+	return ph.ss if ph.ss > 0 else b.ss_set
+}
+
+// How many splats the current phase draws of those sorted.
+bench_visible :: proc(b: ^Bench, visible: int) -> int {
+	return int(f32(visible) * BENCH_PHASES[b.phase].fraction)
+}
+
+// Called after a sort and its upload, with the time they took.
+bench_sorted :: proc(b: ^Bench, ms: f64) {
+	if !b.ok do return
+	if time.duration_seconds(time.tick_since(b.phase_start)) > BENCH_WARMUP do append(&b.sorts_ms, ms)
+}
+
+// One frame, at its start: records the last frame's wall-clock time, moves
+// the camera as the phase wants, walks the characters and checks their
+// sight. true when the test is over.
+bench_frame :: proc(b: ^Bench, wm: ^World_Map, iso: ^Iso, world_scale: f32) -> bool {
 	if !b.ok do return true
-	b.elapsed += dt
-	if b.elapsed > BENCH_WARMUP do append(&b.frames_ms, f64(dt) * 1000)
-	iso.azimuth = math.mod(iso.azimuth + BENCH_TURN * dt, 360)
+	now := time.tick_now()
+	dt := time.duration_seconds(time.tick_diff(b.last, now))
+	b.last = now
+	in_phase := time.duration_seconds(time.tick_diff(b.phase_start, now))
+	if in_phase > BENCH_WARMUP do append(&b.frames_ms, dt * 1000)
+	if in_phase >= BENCH_WARMUP + bench_phase_seconds(b) {
+		bench_close_phase(b)
+		b.phase += 1
+		if b.phase >= len(BENCH_PHASES) do return true
+		b.phase_start = now
+		iso.target, iso.azimuth = b.start_target, b.start_azimuth
+		b.pan_t = 0
+	}
+
+	switch BENCH_PHASES[b.phase].motion {
+	case .Still:
+	case .Turn:
+		iso.azimuth = math.mod(iso.azimuth + BENCH_TURN * f32(dt), 360)
+	case .Pan:
+		// to and fro along the view's right, at a run
+		b.pan_t += f32(dt)
+		s, c := math.sincos(iso.azimuth * math.RAD_PER_DEG)
+		right := [3]f32{c, 0, -s}
+		period := 2 * BENCH_PAN / BENCH_RUN
+		phase := math.mod(b.pan_t, period) / period
+		tri := 1 - abs(2 * phase - 1) // 0 -> 1 -> 0
+		iso.target = b.start_target + right * (tri - 0.5) * BENCH_PAN * world_scale
+	}
 
 	m := &wm.m
-	step := gamemap.DEFAULT_SPEED * dt
+	step := gamemap.DEFAULT_SPEED * f32(dt)
 	for &c in b.characters {
 		if c.index >= len(c.path) do replan(&c, m)
 		left := step
@@ -135,13 +242,48 @@ bench_frame :: proc(b: ^Bench, wm: ^World_Map, iso: ^Iso, dt: f32) -> bool {
 			}
 		}
 	}
-	// everyone looks at the first: the cost of 9 guards' sight a frame
 	target := b.characters[0].pos
 	for c in b.characters[1:] {
 		b.sight_checks += 1
-		if gamemap.can_see_body(m, gamemap.eye_point(c.pos, .Standing), target, .Standing) do b.seen += 1
+		_ = gamemap.can_see_body(m, gamemap.eye_point(c.pos, .Standing), target, .Standing)
 	}
-	return b.elapsed >= b.seconds + BENCH_WARMUP
+	return false
+}
+
+@(private = "file")
+bench_close_phase :: proc(b: ^Bench) {
+	ph := BENCH_PHASES[b.phase]
+	st := Bench_Stats{name = ph.name, ss = bench_ss(b), splats = int(f32(b.splats) * ph.fraction)}
+	ms := b.frames_ms[:]
+	if len(ms) > 0 {
+		sorted := slice.clone(ms, context.temp_allocator)
+		slice.sort(sorted)
+		q :: proc(s: []f64, f: f64) -> f64 {return s[min(int(f * f64(len(s) - 1) + 0.5), len(s) - 1)]}
+		sum, over := 0.0, 0
+		for v in ms {
+			sum += v
+			if v > BENCH_BUDGET_MS do over += 1
+		}
+		st.frames = len(ms)
+		st.mean_ms = sum / f64(len(ms))
+		st.p50_ms, st.p95_ms, st.p99_ms = q(sorted, 0.5), q(sorted, 0.95), q(sorted, 0.99)
+		st.max_ms = sorted[len(sorted) - 1]
+		st.mean_fps = 1000 / st.mean_ms
+		st.over_budget = f64(over) / f64(len(ms))
+		st.passes = st.p95_ms <= BENCH_BUDGET_MS
+	}
+	if len(b.sorts_ms) > 0 {
+		sum := 0.0
+		for v in b.sorts_ms do sum += v
+		st.sorts = len(b.sorts_ms)
+		st.sort_ms = sum / f64(len(b.sorts_ms))
+	}
+	append(&b.results, st)
+	clear(&b.frames_ms)
+	clear(&b.sorts_ms)
+	fmt.printfln("bench: %-18s %5d frames  mean %6.2f ms (%3.0f fps)  p50 %6.2f  p95 %6.2f  p99 %6.2f  max %7.2f  | %4d sorts of %6.2f ms | %s",
+		st.name, st.frames, st.mean_ms, st.mean_fps, st.p50_ms, st.p95_ms, st.p99_ms, st.max_ms, st.sorts, st.sort_ms,
+		"60 fps holds" if st.passes else "under 60 fps")
 }
 
 bench_draw :: proc(b: ^Bench, wm: ^World_Map) {
@@ -157,71 +299,31 @@ bench_draw :: proc(b: ^Bench, wm: ^World_Map) {
 }
 
 Bench_Report :: struct {
-	seconds:       f32    `json:"seconds"`,
-	frames:        int    `json:"frames"`,
-	window:        [2]i32 `json:"window"`,
-	art:           [2]i32 `json:"art"`,
-	supersample:   int    `json:"supersample"`,
-	splats:        int    `json:"splats"`,
-	characters:    int    `json:"characters"`,
-	map_cells:     [2]int `json:"mapCells"`,
-	mean_ms:       f64    `json:"meanMs"`,
-	p50_ms:        f64    `json:"p50Ms"`,
-	p95_ms:        f64    `json:"p95Ms"`,
-	p99_ms:        f64    `json:"p99Ms"`,
-	max_ms:        f64    `json:"maxMs"`,
-	mean_fps:      f64    `json:"meanFps"`,
-	over_budget:   f64    `json:"overBudget"`, // share of frames over 16.7 ms
-	passes:        bool   `json:"passes60"`,   // p95 within 16.7 ms
-	sight_checks:  int    `json:"sightChecks"`,
-	renderer:      string `json:"renderer"`,
+	window:       [2]i32        `json:"window"`,
+	art:          [2]i32        `json:"art"`,
+	splats:       int           `json:"splats"`,
+	characters:   int           `json:"characters"`,
+	map_cells:    [2]int        `json:"mapCells"`,
+	sight_checks: int           `json:"sightChecks"`,
+	phases:       []Bench_Stats `json:"phases"`,
 }
 
 // The stats, to the console and to b.out.
-bench_report :: proc(b: ^Bench, wm: ^World_Map, splats: int, art: [2]i32, ss: int) {
+bench_report :: proc(b: ^Bench, wm: ^World_Map) {
 	if !b.ok {
 		fmt.eprintfln("bench: did not run: %s", b.note)
 		return
 	}
-	ms := b.frames_ms[:]
-	if len(ms) == 0 {
-		fmt.eprintln("bench: no frames recorded")
-		return
-	}
-	sorted := slice.clone(ms, context.temp_allocator)
-	slice.sort(sorted)
-	q :: proc(s: []f64, f: f64) -> f64 {return s[min(int(f * f64(len(s) - 1) + 0.5), len(s) - 1)]}
-	sum, over := 0.0, 0
-	for v in ms {
-		sum += v
-		if v > BENCH_BUDGET_MS do over += 1
-	}
-	mean := sum / f64(len(ms))
 	r := Bench_Report{
-		seconds      = b.seconds,
-		frames       = len(ms),
 		window       = {rl.GetScreenWidth(), rl.GetScreenHeight()},
-		art          = art,
-		supersample  = ss,
-		splats       = splats,
+		art          = b.art,
+		splats       = b.splats,
 		characters   = BENCH_CHARACTERS,
 		map_cells    = {wm.m.w, wm.m.h},
-		mean_ms      = mean,
-		p50_ms       = q(sorted, 0.5),
-		p95_ms       = q(sorted, 0.95),
-		p99_ms       = q(sorted, 0.99),
-		max_ms       = sorted[len(sorted) - 1],
-		mean_fps     = 1000 / mean,
-		over_budget  = f64(over) / f64(len(ms)),
-		passes       = q(sorted, 0.95) <= BENCH_BUDGET_MS,
 		sight_checks = b.sight_checks,
-		renderer     = fmt.tprintf("%s", rl.GetMonitorName(rl.GetCurrentMonitor())),
+		phases       = b.results[:],
 	}
-	fmt.printfln("bench: %d frames, %d splats, %d characters, art %dx%d (ss %d) in a %dx%d window",
-		r.frames, r.splats, r.characters, r.art.x, r.art.y, r.supersample, r.window.x, r.window.y)
-	fmt.printfln("bench: mean %.2f ms (%.0f fps), p50 %.2f, p95 %.2f, p99 %.2f, max %.2f ms; %.1f%% of frames over 16.7 ms: %s",
-		r.mean_ms, r.mean_fps, r.p50_ms, r.p95_ms, r.p99_ms, r.max_ms, 100 * r.over_budget,
-		"60 fps holds" if r.passes else "60 fps does NOT hold (p95 over budget)")
+	fmt.printfln("bench: %d splats, %d characters, art %dx%d in a %dx%d window", r.splats, r.characters, r.art.x, r.art.y, r.window.x, r.window.y)
 	text, err := json.marshal(r, {pretty = true}, context.temp_allocator)
 	if err != nil do return
 	if werr := os.write_entire_file(b.out, text); werr != nil {
@@ -234,4 +336,6 @@ bench_report :: proc(b: ^Bench, wm: ^World_Map, splats: int, art: [2]i32, ss: in
 bench_destroy :: proc(b: ^Bench) {
 	for &c in b.characters do delete(c.path)
 	delete(b.frames_ms)
+	delete(b.sorts_ms)
+	delete(b.results)
 }

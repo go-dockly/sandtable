@@ -252,7 +252,19 @@ The slice's last box: the splat backdrop plus 10 characters at 60 fps on the har
 odin run . -o:speed -collection:cmd=../commandos -- levels/krakow.json --bench 30
 ```
 
-For 30 s (after 1 s of warm-up) the window renders the level uncapped, vsync off, with the camera turning 6° a second the whole time, so the splats are re-sorted every frame (the worst case: a camera following a commando), and 10 capsule characters walking gamemap paths while 9 of them check `can_see_body` against the first every frame. Then it prints the frame times and writes `bench.json` (`--bench-out` for another path): mean, p50, p95, p99 and max ms, the share of frames over 16.7 ms, and `passes60` (p95 within 16.7 ms), with the window and art size, supersampling and splat count. Run it at the window size and `ss` you mean to ship, `-o:speed` always.
+The window renders the level uncapped, vsync off, in the game camera, with 10 capsule characters walking gamemap paths while 9 of them check `can_see_body` against the first every frame. The time is split into five phases that each change one thing, so the stats say where a frame goes:
+
+| Phase | Changes | Tells |
+|-------|---------|-------|
+| `still` | the camera stands still: no sorting | the draw and the post pass alone |
+| `still ss1` | supersampling 1 | how much is fill rate |
+| `still half splats` | half the splats drawn | how much is per splat |
+| `pan (follow)` | the camera follows a running commando | the game's case |
+| `turn` | the camera turns 6° a second | re-sorting as often as it happens |
+
+Each phase gets a second of warm-up that is not recorded; frames are timed with the wall clock, the CPU sort and its upload on their own. A line per phase goes to the console (mean, p50, p95, p99, max ms, sorts and their mean ms, whether p95 is within 16.7 ms) and everything to `bench.json` (`--bench-out` for another path). Run it at the window size and `ss` you mean to ship, `-o:speed` always.
+
+In the game camera only the splats that reach the view, plus a margin of 30% on each side, are sorted and drawn (`splatsort/`, on every core). A pan does not change an orthographic view's order, so the camera re-sorts only after panning through half that margin, or zooming; turning re-sorts every 1.8°.
 
 ## Terrain
 
@@ -291,6 +303,7 @@ The parts that can be tested without a window are packages without raylib; the r
 | `terrain/` | the terrain proxy: heightmaps from the cloud, height / normal / footprint sampling, ray picking, heightmap export | `odin test terrain` |
 | `editor/` | objects with stable ids, the select / place / move state machine, undo / redo, cursor rays, picking, click-or-drag, terrain snapping | `odin test editor` |
 | `scene/` | the level file (read, write, repair, asset references, relative paths, the map section and its edits) and the Commandos export | `odin test scene -collection:cmd=../commandos` |
+| `splatsort/` | the splats' back-to-front order on every core, and culling to the game camera's view | `odin test splatsort` |
 | `mapgen/` | the automatic gameplay map from the terrain proxy: alignment, structures to buildings, trees and walls, props, ground; feature ids and retargeting edits | `odin test mapgen -collection:cmd=../commandos` |
 | `../commandos/gamemap/` | the gameplay map itself, shared with the game: format, layered A*, sight, edits | `cd ../commandos && odin test gamemap` |
 | `tools/commandos_check/` | an export through commandos' own loader, collision and A*; and the gameplay map end to end: mapgen, edits, the map files, a mission in map metres, played by commandos | `odin run tools/commandos_check -collection:cmd=../commandos -collection:st=.` |

@@ -26,6 +26,8 @@ import ospz "../ospz"
 import rl "vendor:raylib"
 import rlgl "vendor:raylib/rlgl"
 
+import "splatsort"
+
 DATA_W :: 1024
 ORDER_W :: 1024
 SH_C0 :: f32(0.28209479177387814)
@@ -43,6 +45,8 @@ Splat_View :: struct {
 	opacity:   []f32,   // per kept splat, for the terrain (terrain/terrain.odin)
 	order:     []u32,
 	depth:     []f32,
+	radius:    []f32, // per kept splat, world units: its reach, for culling
+	sorter:    splatsort.Sorter,
 	visible:   int,
 	data_w:    i32,
 	data_h:    i32,
@@ -180,6 +184,7 @@ load_view :: proc(path: string) -> (view: Splat_View, err: ospz.Spz_Error) {
 	}
 
 	pos := make([][3]f32, n)
+	rad := make([]f32, n)
 	cols := make([][4]u8, n)
 	ops := make([]f32, n)
 	texels := n * 4
@@ -241,12 +246,14 @@ load_view :: proc(path: string) -> (view: Splat_View, err: ospz.Spz_Error) {
 		pos[kept] = {px, py, pz}
 		cols[kept] = {to_u8(cr), to_u8(cg), to_u8(cb), 255}
 		ops[kept] = a
+		rad[kept] = splatsort.radius_of(sx, sy, sz)
 		kept += 1
 	}
 	if kept == 0 {
 		delete(pos)
 		delete(cols)
 		delete(ops)
+		delete(rad)
 		delete(floats)
 		return {}, .Invalid_Data
 	}
@@ -255,6 +262,8 @@ load_view :: proc(path: string) -> (view: Splat_View, err: ospz.Spz_Error) {
 	view.pos = pos[:kept]
 	view.colors = cols[:kept]
 	view.opacity = ops[:kept]
+	view.radius = rad[:kept]
+	splatsort.sorter_init(&view.sorter)
 	view.center, view.extent = robust_bounds(view.pos, 0.02, 0.98)
 	if view.extent < 1e-4 do view.extent = 1
 	view.name = fmt.aprintf("%s", path)
@@ -310,6 +319,8 @@ release_view :: proc(v: ^Splat_View) {
 	delete(v.order)
 	delete(v.order_px)
 	delete(v.depth)
+	delete(v.radius)
+	splatsort.sorter_destroy(&v.sorter)
 	if len(v.name) > 0 do delete(v.name)
 	v^ = {}
 }
@@ -334,62 +345,15 @@ robust_bounds :: proc(pos: [][3]f32, lo_q, hi_q: f32) -> (center: [3]f32, extent
 	return
 }
 
-SORT_BUCKETS :: 1 << 16
-SORT_NEAR :: f32(0.01)
-
-sort_bucket :: proc(d, lo, scale: f32) -> int {
-	// far splats land in low buckets, so they are drawn first (back-to-front)
-	return (SORT_BUCKETS - 1) - min(int((d - lo) * scale), SORT_BUCKETS - 1)
-}
-
-sort_order :: proc(v: ^Splat_View, cam, fwd: [3]f32, far: f32) {
-	counts: [SORT_BUCKETS]u32 // zero-initialised
-
-	lo, hi := max(f32), -max(f32)
-	for p, i in v.pos {
-		d := (p.x - cam.x) * fwd.x + (p.y - cam.y) * fwd.y + (p.z - cam.z) * fwd.z
-		v.depth[i] = d
-		if d > SORT_NEAR && d < far {
-			lo = min(lo, d)
-			hi = max(hi, d)
-		}
-	}
-	if hi <= lo {
-		v.visible = 0
-		return
-	}
-	scale := f32(SORT_BUCKETS - 1) / (hi - lo)
-
-	for d in v.depth {
-		if d > SORT_NEAR && d < far {
-			counts[sort_bucket(d, lo, scale)] += 1
-		}
-	}
-
-	sum: u32
-	for i in 0 ..< SORT_BUCKETS {
-		c := counts[i]
-		counts[i] = sum
-		sum += c
-	}
-
-	for d, i in v.depth {
-		if d > SORT_NEAR && d < far {
-			b := sort_bucket(d, lo, scale)
-			v.order[counts[b]] = u32(i)
-			counts[b] += 1
-		}
-	}
-
-	v.visible = int(sum)
-	for k in 0 ..< v.visible {
-		id := v.order[k]
-		px := v.order_px[k * 4:]
-		px[0] = u8(id)
-		px[1] = u8(id >> 8)
-		px[2] = u8(id >> 16)
-		px[3] = 255
-	}
+// Back to front for a view (splatsort/: on every core). With `cull`, the
+// splats that cannot reach the orthographic view's box are left out: neither
+// sorted nor drawn, so the order must be redone before the view moves out of
+// the box's margin (main.odin).
+sort_order :: proc(v: ^Splat_View, cam, fwd: [3]f32, far: f32, cull := splatsort.Cull{}) {
+	v.visible = splatsort.sort(&v.sorter,
+		{pos = v.pos, radius = v.radius, cam = cam, fwd = fwd, far = far, cull = cull},
+		{depth = v.depth, order = v.order, order_px = v.order_px},
+	)
 }
 
 make_quad :: proc() -> rl.Mesh {
