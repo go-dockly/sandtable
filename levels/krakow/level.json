@@ -9,6 +9,13 @@
   "maxTilt": 20,
   "nextId": 2,
   "view": { "target": [-0.001953125, 0.08569336, -0.03540039], "azimuth": 45, "viewHeight": 1.1446778 },
+  "game": { "mission": "build/mission.json", "base": "mission.base.json", "origin": [-0.3450879, -0.3968457], "size": [135, 151], "buildingsFromTerrain": true },
+  "map": {
+    "file": "build/map.json",
+    "cell": 1,
+    "yaw": 45,
+    "edits": []
+  },
   "assets": [
     { "id": "volkswagen_82", "path": "../../models/car/volkswagen_82.glb" }
   ],
