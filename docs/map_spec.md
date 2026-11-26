@@ -206,7 +206,12 @@ The biggest risk is the speed of drawing splats in the game; the speed test in t
 For us to decide:
 
 1. Does gamemap live inside commandos or in a repo of its own?
+    I'd say `https://github.com/go-dockly/commandos`
 2. Is 0.5 m the right cell, or is 1 m enough for the feel you want?
+    Let's see if we can get away with 1 m. It's still a game not reality.
 3. Interiors: drawn with GLB kits or painted panels? Does time run on outside?
+    Not sure I understand?
 4. Which specialists use which links (climb, swim, window)? This needs the team list.
+    Let's start small with one like enter a building sequence.
 5. Is four fixed views the camera, or do you want a free turn as sandtable has now?
+    We want to use the sandtable camera in commandos too

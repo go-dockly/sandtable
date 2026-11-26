@@ -255,7 +255,7 @@ Don't bake placed assets into `krakow.spz` & don't rewrite the splat.
 
 Instead, create a lightweight scene file that references both the terrain & the GLB assets.
 
-For example, as we do in `https://github.com/algo-boyz/commandos/blob/main/mission/eagle/mission.json`:
+For example, as we do in `https://github.com/go-dockly/commandos/blob/main/mission/eagle/mission.json`:
 
 ```
 {
