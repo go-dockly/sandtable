@@ -5,12 +5,13 @@ package mapgen_check
 // For reproducing a map from someone else's capture.
 //
 //   odin run tools/mapgen_check -collection:cmd=../commandos -collection:st=. -- \
-//       out/krakow.terrain.json [levels/krakow.json] [out/krakow.check]
+//       levels/krakow/build/terrain.terrain.json [levels/krakow/level.json] [out prefix]
 //
-//   terrain.json  terrain.export's output (--terrain-export): the PGMs beside it
+//   terrain.json  terrain.export's output (ctrl+E writes it into the level's
+//                 build/, or --terrain-export): the PGMs beside it
 //   level.json    optional: its game region, map cell, kept yaw and edits;
 //                 without it, the whole export at 1 m with a measured yaw
-//   out prefix    default: the export's prefix + ".check". Writes
+//   out prefix    default: "check" beside the export. Writes
 //                 <out>.map.json + .map.bin and <out>.ppm, a picture of the map
 //
 // Prints the terrain's classes, ground / floor / surface along a few rows
@@ -70,8 +71,8 @@ main :: proc() {
 			edits = s.edits
 		}
 	}
-	out_prefix := strings.trim_suffix(json_path, ".terrain.json")
-	out_prefix = args[2] if len(args) >= 3 else fmt.tprintf("%s.check", out_prefix)
+	out_prefix := os.dir(json_path)
+	out_prefix = args[2] if len(args) >= 3 else fmt.tprintf("%s/check", out_prefix if out_prefix != "" else ".")
 
 	// ---- the terrain --------------------------------------------------------
 	n := ter.w * ter.h

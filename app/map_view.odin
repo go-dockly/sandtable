@@ -8,7 +8,7 @@ package main
 //               one guard standing at the cursor, facing away from the
 //               camera, with his vision cone from gamemap.visible: what the
 //               game's guards will see, from the game's own code
-//   ctrl+E      also writes <id>.map.json + .map.bin, and the mission points
+//   ctrl+E      also writes build/map.json + map.bin, and the mission points
 //               at it with "map"
 //
 // The map is rebuilt on entering the view, on shift+Z in it, and on export.
@@ -16,14 +16,14 @@ package main
 
 import "core:fmt"
 import "core:math"
-import "core:strings"
+import "core:os"
 
 import rl "vendor:raylib"
 import rlgl "vendor:raylib/rlgl"
 
 import "cmd:gamemap"
-import "mapgen"
-import "scene"
+import "../mapgen"
+import "../scene"
 
 CONE_FOV   :: f32(90)  // degrees
 CONE_RANGE :: f32(24)  // metres, the game's VISION_DEFAULT
@@ -52,8 +52,7 @@ world_map_destroy :: proc(wm: ^World_Map) {
 // The level's map section, or the one the first export will create.
 level_map_section :: proc(lv: ^Level_State) -> scene.Map_Section {
 	if s, ok := lv.map_section.?; ok do return s
-	id := lv.id if len(lv.id) > 0 else "level"
-	return scene.Map_Section{file = fmt.tprintf("%s.map.json", id), cell = scene.MAP_DEFAULT_CELL}
+	return scene.Map_Section{file = scene.build_file("map.json"), cell = scene.MAP_DEFAULT_CELL}
 }
 
 // Replaces the map section (a copy is kept).
@@ -111,6 +110,9 @@ world_map_export :: proc(wm: ^World_Map, lv: ^Level_State, relative_to: string) 
 	if !wm.ok do return "", .Write
 	sec := level_map_section(lv)
 	path := scene.resolve(lv.path, sec.file, context.temp_allocator)
+	if dir := scene.level_dir(path); dir != "." && !os.exists(dir) {
+		if os.make_directory_all(dir) != nil do return "", .Write
+	}
 	if e := gamemap.save(wm.m, path); e != .None do return "", e
 	if _, has := sec.yaw.?; !has {
 		sec.yaw = wm.stats.yaw
@@ -303,19 +305,3 @@ world_map_draw :: proc(wm: ^World_Map) {
 	rlgl.EnableBackfaceCulling()
 }
 
-draw_map_hud :: proc(wm: ^World_Map, lv: ^Level_State, x, y: i32) {
-	col := rl.Color{170, 200, 220, 255}
-	if !wm.ok {
-		rl.DrawText("map: not built (no terrain)", x, y, 16, {200, 150, 120, 255})
-		return
-	}
-	s := wm.stats
-	sec := level_map_section(lv)
-	yaw_note := "" if sec.yaw != nil else " (measured: ctrl+E keeps it)"
-	problems := strings.clone_to_cstring(fmt.tprintf(" | %d edit%s could not be applied (see the console)", wm.problems, "" if wm.problems == 1 else "s") if wm.problems > 0 else "", context.temp_allocator)
-	rl.DrawText(
-		fmt.ctprintf("map %dx%d @ %.1f m, yaw %.1f%s | %d buildings  %d trees  %d walls  %d props | %d edits%s | guard at the cursor: %d m cone",
-			s.w, s.h, wm.m.cell, s.yaw, yaw_note, s.buildings, s.trees, s.walls, s.props, wm.edits, problems, int(CONE_RANGE)),
-		x, y, 16, col if wm.problems == 0 else rl.Color{230, 160, 90, 255},
-	)
-}

@@ -8,12 +8,29 @@ The capture is the terrain and is never edited; the GLBs are the editable object
 
 ## The workflow
 
-1. **Open a capture.** `odin run . -o:speed -collection:cmd=../commandos -- ../models/terrain/krakow.spz --world-scale 0.005 --model ../models/car/volkswagen_82.glb --align`. sandtable builds a terrain proxy from the cloud (ground and roof heightmaps) in under a second.
+1. **Open a capture.** `odin run app -out:sandtable -o:speed -collection:cmd=../commandos -- ../models/terrain/krakow.spz --world-scale 0.005 --model ../models/car/volkswagen_82.glb --align`. sandtable builds a terrain proxy from the cloud (ground and roof heightmaps) in under a second.
 2. **Place objects.** `A`, then click along the street: each click stamps a car that stands on the ground and tilts to the slope. Click a car to select it, `W` to move it, `,` `.` to turn it, `Delete` to remove it, `ctrl+Z` to undo.
-3. **Save.** `ctrl+S` writes `levels/krakow.json`. Reopen it tomorrow with `odin run . -o:speed -collection:cmd=../commandos -- levels/krakow.json`.
-4. **Write the gameplay** (spawn, guards, objective) in `levels/krakow.mission.base.json`, by hand; the HUD shows the cursor in game coordinates (map metres once the level has a map).
-5. **Export.** `ctrl+E` writes `levels/krakow.mission.json`: your gameplay, plus the capture's buildings and the cars as collision and cover. Next to it, `levels/krakow.map.json` and `.map.bin`: the gameplay map (see *Gameplay map*), which the mission names in `"map"`.
-6. **Play it.** `cd ../commandos && odin run . -- ../sandtable/levels/krakow.mission.json`.
+3. **Save.** `ctrl+S` writes `levels/krakow/level.json`. Reopen it tomorrow with `odin run app -out:sandtable -o:speed -collection:cmd=../commandos -- levels/krakow/level.json`.
+4. **Write the gameplay** (spawn, guards, objective) in `levels/krakow/mission.base.json`, by hand; the Level panel shows the cursor in game coordinates (map metres once the level has a map).
+5. **Export.** `ctrl+E` writes the level's `build/`: `mission.json`, your gameplay plus the capture's buildings and the cars as collision and cover; `map.json` and `map.bin`, the gameplay map (see *Gameplay map*), which the mission names in `"map"`; and `terrain.*`, the terrain export.
+6. **Play it.** `cd ../commandos && odin run . -- ../sandtable/levels/krakow/build/mission.json`.
+
+## Levels
+
+One folder per level; what you edit sits at the top, what the editor writes from it in `build/`:
+
+```
+levels/krakow/
+  level.json            the level: capture, models, objects, map edits, pixel look, view
+  mission.base.json     your gameplay (spawn, guards, objective), merged into the export
+  level.autosave.json   unsaved changes when the window closed (not in git)
+  build/                ctrl+E
+    mission.json        what commandos plays
+    map.json, map.bin   the gameplay map
+    terrain.*           the terrain export, for tools/mapgen_check (not in git)
+```
+
+A new capture saves to `levels/<capture name>/level.json`. The mission and map are in git so commandos can load them from the repo; the terrain export, check output and autosave are rebuilt.
 
 ## Setup
 
@@ -29,16 +46,19 @@ dev/
 
 ```
 cd sandtable
-odin run . -collection:cmd=../commandos -- ../ospz/models/tree.ply
+odin run app -out:sandtable -collection:cmd=../commandos -- ../ospz/models/tree.ply
 
-# export
-odin run . -o:speed -collection:cmd=../commandos -- ./models/terrain/krakow.spz --world-scale 0.005 --model ./models/car/volkswagen_82.glb --align --terrain-export out/krakow
+# a capture
+odin run app -out:sandtable -o:speed -collection:cmd=../commandos -- ./models/terrain/krakow.spz --world-scale 0.005 --model ./models/car/volkswagen_82.glb --align
+
+# a level
+odin run app -out:sandtable -o:speed -collection:cmd=../commandos -- levels/krakow/level.json
 
 # bench
-odin run . -o:speed -collection:cmd=../commandos -- levels/krakow.json --bench 30
+odin run app -out:sandtable -o:speed -collection:cmd=../commandos -- levels/krakow/level.json --bench 30
 ```
 
-`-collection:cmd=../commandos` is needed for every build and for the `scene` and `mapgen` tests: the gameplay map's format, movement and sight are commandos' `gamemap` package, so the editor previews with the game's own code.
+The editor is the `app/` package; `-out:sandtable` because Odin names the program after its folder, and a program called `app` can't sit beside the `app/` folder. `-collection:cmd=../commandos` is needed for every build and for the `scene` and `mapgen` tests: the gameplay map's format, movement and sight are commandos' `gamemap` package, so the editor previews with the game's own code.
 
 Use `-o:speed` for big captures: sorting millions of splats is slow in a debug build.
 
@@ -137,7 +157,20 @@ The game camera's look is the level's `pixel` section: two ends of the zoom, eac
 
 Game camera: the 38° Commandos tilt stays fixed. Left-drag or a sideways two-finger swipe turns it, `←` `→` by 90°; shift + left-drag (or right / middle drag) pans; scroll zooms; `R` returns to 45°. Free camera: left-drag orbits, scroll zooms.
 
-The HUD shows the object's size in metres, positions to ~1 cm at the current world scale, how many art pixels the object spans in the game camera (sprite readability), whether the level is saved, and the cursor in game coordinates.
+## Panels
+
+Two windows of collapsible sections, in JetBrains Mono (`app/assets/fonts`, OFL), drawn with microui; drag them by the title, `F1` hides them. While the mouse is on a panel the scene leaves it alone, so a click or a scroll there doesn't place, pick or zoom.
+
+| Window | Section | Shows, does |
+|--------|---------|-------------|
+| sandtable (left) | Level | the level and its file, saved or not, missing models, the cursor in game coordinates; Save, Reload, Export; *Levels*: every `levels/<name>/level.json`, click to open |
+| | Objects | count, mode, undo / redo, and for the selection: model, size in metres, scale, yaw, how many art pixels long it is on screen (sprite readability), position, snap, align, offset |
+| | Terrain & map | the terrain grid and its classes; the view (splats, grey-box, both, map) and a rebuild; in the map view, the map's size, yaw, features and edits |
+| View (right) | Look | camera, palette, palette / hard splats / outline / supersample, dither, grade, alpha cut; splats drawn, art size, fps |
+| | Pixel | the pixel size now, the two ends, tuning and storing the ends |
+| | Keys | every shortcut |
+
+Buttons press the same shortcuts as the keys, so either way runs the same code. Messages (saved, exported, what went wrong) show for a few seconds at the bottom left.
 
 ## Levels
 
@@ -187,9 +220,9 @@ Safe by default:
 
 ## Commandos export
 
-`ctrl+E` (`cmd+E`) writes a mission that [commandos](https://github.com/algo-boyz/commandos) loads as it is (`mission/mission.odin`), next to the level by default: `levels/krakow.mission.json`.
+`ctrl+E` (`cmd+E`) writes a mission that [commandos](https://github.com/algo-boyz/commandos) loads as it is (`mission/mission.odin`), into the level's build folder by default: `levels/krakow/build/mission.json`.
 
-The game plays in 2D, top-down, one unit a metre (a guard is 0.8 across). The export maps one metre of the capture to one game unit: game x, y = world x, z minus the region's corner, divided by the world scale. The axes are the same, so nothing is mirrored. The region (corner and size) is kept in the level's `game` section, so adding a car later doesn't move every coordinate a designer has typed. It defaults to the whole terrain; edit `origin` and `size` in the level to cut out a smaller map. The HUD shows the cursor in game units, for typing spawns and patrols.
+The game plays in 2D, top-down, one unit a metre (a guard is 0.8 across). The export maps one metre of the capture to one game unit: game x, y = world x, z minus the region's corner, divided by the world scale. The axes are the same, so nothing is mirrored. The region (corner and size) is kept in the level's `game` section, so adding a car later doesn't move every coordinate a designer has typed. It defaults to the whole terrain; edit `origin` and `size` in the level to cut out a smaller map. The Level panel shows the cursor in game units, for typing spawns and patrols.
 
 | Mission field | From |
 |---------------|------|
@@ -197,7 +230,7 @@ The game plays in 2D, top-down, one unit a metre (a guard is 0.8 across). The ex
 | `cover` | the base mission's, then each object's footprint as `crate` rectangles. The game's solids are axis-aligned, so a turned car is traced on a 25 cm grid; crates block movement and sight |
 | `props` | every object, for drawing its GLB in the game later: asset, x, y, elevation (m), yaw, scale, tilt, size. The game ignores it for now |
 | `coordinateSpace` | the region |
-| `playerSpawn`, `extraction`, `objective`, `walls`, `guards`, anything else | the designer's `levels/krakow.mission.base.json`, untouched. Without one: no guards, and a spawn on open ground near the middle |
+| `playerSpawn`, `extraction`, `objective`, `walls`, `guards`, anything else | the designer's `levels/krakow/mission.base.json`, untouched. Without one: no guards, and a spawn on open ground near the middle |
 | `sandtable` | the level it came from, the region's corner, world scale, ground height: how to map back |
 
 Gameplay is never written by sandtable: keep it in the base file and re-export. The generated mission says so in its `sandtable.note`.
@@ -206,7 +239,7 @@ To play it (commandos takes the mission as its argument):
 
 ```
 cd ../commandos
-odin run . -- ../sandtable/levels/krakow.mission.json
+odin run . -- ../sandtable/levels/krakow/build/mission.json
 ```
 
 Limits: trees are structures too, so their canopies become blocks, and a region much over 200 × 200 m makes the game's grid A* slow.
@@ -230,7 +263,7 @@ Edits live in the level's `map` section, one per line, applied in order. For now
 
 ```json
   "map": {
-    "file": "krakow.map.json",
+    "file": "build/map.json",
     "cell": 1,
     "yaw": 20,
     "edits": [
@@ -253,9 +286,9 @@ Edits live in the level's `map` section, one per line, applied in order. For now
 | `Link` | `link` (Stairs, Ladder, Door, Window, Drop, Climb), `a`, `b`, `ability`, `door` | joins two places walking can't: ends in map metres (x, y, h) |
 | `Interior` | `target` building, `size`, door `a` (street) and `b` (inside) | the hook for an interior map |
 
-Coordinates are map metres: x right, y down in the top view, h up from the terrain's lowest ground. The 4th `Tab` view draws the map (floors by layer and surface, solids as boxes) and a guard standing at the cursor, facing away from the camera, with his 24 m, 90° vision cone from `gamemap.visible`: what the game's guards will see. The HUD line under the level's says what was built and how many edits failed.
+Coordinates are map metres: x right, y down in the top view, h up from the terrain's lowest ground. The 4th `Tab` view draws the map (floors by layer and surface, solids as boxes) and a guard standing at the cursor, facing away from the camera, with his 24 m, 90° vision cone from `gamemap.visible`: what the game's guards will see. The Terrain & map panel says what was built and how many edits failed.
 
-Once the level has a map, the export writes the whole mission in map metres (spawn and guards as you type them, the captured buildings, cover and props in the map's turned frame, `"yaw"` in its `sandtable` block), the HUD's cursor is in map metres, and the mission names the map in `"map"`: commandos then plays on it (movement, floors, ladders, sight by stance). A guard on a roof gets `"height"` in its definition: the floor its patrol is on.
+Once the level has a map, the export writes the whole mission in map metres (spawn and guards as you type them, the captured buildings, cover and props in the map's turned frame, `"yaw"` in its `sandtable` block), the panel's cursor is in map metres, and the mission names the map in `"map"`: commandos then plays on it (movement, floors, ladders, sight by stance). A guard on a roof gets `"height"` in its definition: the floor its patrol is on.
 
 Limits: trees are told apart by their shape and the ground under them, not by colour yet; roads and grass are not told apart; a two-sided roof is stamped flat; a row of trees is one tree with one trunk. Footprints come out up to a metre larger than the capture's edges (cells half covered count), so put a ladder's foot against the map's wall, as the map view shows it. A wall right at the terrain's 2 m structure height splits between the two passes: it still blocks, but may be classed oddly.
 
@@ -264,7 +297,7 @@ Limits: trees are told apart by their shape and the ground under them, not by co
 The slice's last box: the splat backdrop plus 10 characters at 60 fps on the hardware you target.
 
 ```
-odin run . -o:speed -collection:cmd=../commandos -- levels/krakow.json --bench 30
+odin run app -out:sandtable -o:speed -collection:cmd=../commandos -- levels/krakow/level.json --bench 30
 ```
 
 The window renders the level uncapped, vsync off, in the game camera, with 10 capsule characters walking gamemap paths while 9 of them check `can_see_body` against the first every frame. The time is split into five phases that each change one thing, so the stats say where a frame goes:
@@ -296,23 +329,23 @@ The object stands on the plane fitted through 5×5 terrain samples under its foo
 
 `Tab` shows the terrain as a grey-box drawn like a GLB object (lit, depth tested against the splats, through the pixel-art pass): the ground as a smooth surface, structures as blocks. It is the quickest check of what placement sees, and the start of a grey-box of the level.
 
-`--terrain-export out/krakow` writes:
+`ctrl+E` writes the terrain into the level's `build/` (`--terrain-export prefix` writes it after every terrain build too):
 
 | File | Holds |
 |------|-------|
-| `krakow.ground.pgm` | ground, 16 bit, 0..65535 = `heightMin`..`heightMax` |
-| `krakow.surface.pgm` | surface, same scale |
-| `krakow.class.pgm` | 8 bit: 0 empty, 85 ground, 170 object, 255 structure |
-| `krakow.floor.pgm` | the low layer before the ground filter (what the filter saw; at the roof under a roof), same scale as ground |
-| `krakow.terrain.json` | origin (world x, z of the corner of cell (0, 0)), cell size, grid size, height range, world scale, build parameters |
+| `terrain.ground.pgm` | ground, 16 bit, 0..65535 = `heightMin`..`heightMax` |
+| `terrain.surface.pgm` | surface, same scale |
+| `terrain.class.pgm` | 8 bit: 0 empty, 85 ground, 170 object, 255 structure |
+| `terrain.floor.pgm` | the low layer before the ground filter (what the filter saw; at the roof under a roof), same scale as ground |
+| `terrain.terrain.json` | origin (world x, z of the corner of cell (0, 0)), cell size, grid size, height range, world scale, build parameters |
 
 Row 0 is the lowest z, column 0 the lowest x; heights are world units (divide by `worldScale` for metres). The folder is made if missing. `terrain.load_export` reads an export back, and `tools/mapgen_check` builds the gameplay map from one without the capture:
 
 ```sh
-odin run tools/mapgen_check -collection:cmd=../commandos -collection:st=. -- out/krakow.terrain.json levels/krakow.json
+odin run tools/mapgen_check -collection:cmd=../commandos -collection:st=. -- levels/krakow/build/terrain.terrain.json levels/krakow/level.json
 ```
 
-It prints the classes, ground / floor / surface along five rows, the map's stats and features, and writes `out/krakow.check.map.json` (+ `.bin`) and `out/krakow.check.ppm`, a picture of the map.
+It prints the classes, ground / floor / surface along five rows, the map's stats and features, and writes `build/check.map.json` (+ `.bin`) and `build/check.ppm`, a picture of the map.
 
 Limits: one height per x/z, so walls are steps between cells and bridges, overhangs and interiors are not represented. Flat roofs wider than 40 m count as ground. The ground under a parked car is only as good as the street splats around it.
 
@@ -329,16 +362,18 @@ The parts that can be tested without a window are packages without raylib; the r
 | `splatsort/` | the splats' back-to-front order on every core, and culling to the game camera's view | `odin test splatsort` |
 | `mapgen/` | the automatic gameplay map from the terrain proxy: alignment, structures to buildings, trees and walls, props, ground; feature ids and retargeting edits | `odin test mapgen -collection:cmd=../commandos` |
 | `../commandos/gamemap/` | the gameplay map itself, shared with the game: format, layered A*, sight, edits | `cd ../commandos && odin test gamemap` |
-| `tools/mapgen_check/` | the gameplay map from a terrain export alone: diagnostics, map files, a picture | `odin run tools/mapgen_check -collection:cmd=../commandos -collection:st=. -- out/x.terrain.json [level.json]` |
+| `tools/mapgen_check/` | the gameplay map from a terrain export alone: diagnostics, map files, a picture | `odin run tools/mapgen_check -collection:cmd=../commandos -collection:st=. -- levels/x/build/terrain.terrain.json [levels/x/level.json]` |
 | `tools/commandos_check/` | an export through commandos' own loader, collision and A*; and the gameplay map end to end: mapgen, edits, the map files, a mission in map metres, played by commandos | `odin run tools/commandos_check -collection:cmd=../commandos -collection:st=.` |
 
-| App file | Does | From |
+| App file (`app/`) | Does | From |
 |----------|------|------|
 | `main.odin` | window, input, the frame: splats and objects into one target, then the pixel-art pass | pass order from `pixlsplat/src/main.odin` |
 | `placement.odin` | loaded models, mouse and keyboard editing, drawing, overlay, command line | |
-| `level.odin` | open, save, reload, autosave, missing models, export, level HUD | |
-| `terrain_view.odin` | terrain build at load, grey-box, terrain HUD | |
-| `map_view.odin` | the gameplay map: build, map view, the guard's cone, map export, map HUD | |
+| `level.odin` | open, save, reload, autosave, missing models, export | |
+| `terrain_view.odin` | terrain build at load, grey-box | |
+| `ui.odin` | microui on raylib: input in, commands out, text in JetBrains Mono; shortcuts buttons can press | `odins-raylib/2D/gui/microui/rlmu` |
+| `panels.odin` | the panels | |
+| `map_view.odin` | the gameplay map: build, map view, the guard's cone, map export | |
 | `model.odin` | GLBs as raylib meshes in the splat pass | pivot, palette & lighting lessons from pixlsplat |
 | `splat.odin` | loading, sorting and the splat shader, with ortho projection and a hard mode | `ospz/viewer/main.odin` |
 | `cameras.odin` | isometric game camera scaled to the cloud; free orbit | `commandos/camera/isometric.odin`, the ospz viewer |
@@ -352,13 +387,13 @@ The parts that can be tested without a window are packages without raylib; the r
 odin test terrain     # 10: a synthetic street with a slope, a building with no ground under it, a tree, a car, haze, sky blobs, at Krakow's scale too; export and load_export round trip
 odin test editor      # 16: rays through both cameras, picking, cursor on street and roof, modes, ids, undo / redo, settling
 odin test artgrid     # 5: snapped render + shifted picture land every point where the true view does, the picture covers the window, the grid stays on the world, zoom resizes in buckets
-odin test scene -collection:cmd=../commandos    # 19: level round trip, repairs, paths, the map section, the pixel section and its interpolation, the export's buildings, footprints and merge
+odin test scene -collection:cmd=../commandos    # 20: level round trip, repairs, paths, the map section, the pixel section and its interpolation, the level list, the export's buildings, footprints and merge
 odin test mapgen -collection:cmd=../commandos   # 9: a turned synthetic town at Krakow's scale: alignment, buildings, a courtyard, a tree, walls high and low, edits, ids, at 1 and 0.5 m
 (cd ../commandos && odin test gamemap)         # 14: movement, ledges, ladders and roofs, links and abilities, sight by stance, cones, edits, files, speed
 odin run tools/commandos_check -collection:cmd=../commandos -collection:st=.   # 27 checks in the game's own code
 ```
 
-[CI](.github/workflows/tests.yml) runs them all on every pull request and on `main`, with the latest Odin release and commandos' `main` (go-dockly/commandos, where gamemap lives). The app itself also needs ospz, ozstd and raylib, and isn't built there.
+[CI](.github/workflows/tests.yml) runs them all on every pull request and on `main`, with the latest Odin release and commandos' `main` (go-dockly/commandos, where gamemap lives). The app (`app/`) also needs ospz, ozstd and raylib, and isn't built there.
 
 ## Status
 

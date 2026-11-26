@@ -1,7 +1,7 @@
 {
 	"format": "commandos-map",
 	"version": 1,
-	"bin": "krakow.map.bin",
+	"bin": "map.bin",
 	"frame": {
 		"origin": [
 			0.020696402,

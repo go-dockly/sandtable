@@ -1,9 +1,16 @@
 sandtable
 sandtable.exe
+mapgen_check
+commandos_check
 *.bin
 *.pdb
-# *.pgm
 models/
-*.autosave.json
 *.json.tmp
 bench.json
+
+# levels: what is edited and what commandos plays are in git; the rest the
+# editor writes again (ctrl+E)
+*.autosave.json
+!levels/*/build/*.bin
+levels/*/build/terrain.*
+levels/*/build/check.*

@@ -2,15 +2,18 @@ package main
 
 // Block 3 glue: the level file (scene/scene.odin) on the raylib side.
 //
-//   sandtable levels/krakow.json            reopen a level: capture, models,
+//   sandtable levels/krakow/level.json      reopen a level: capture, models,
 //                                           objects, world scale and view
 //   sandtable krakow.spz --level my.json    start from a capture, save to my.json
 //                                           (loaded instead if it exists)
-//   sandtable krakow.spz                    saves to levels/krakow.json
+//   sandtable krakow.spz                    saves to levels/krakow/level.json
+//
+// A level's folder: see scene.default_level_path.
 //
 //   ctrl+S (cmd+S)   save
 //   ctrl+R (cmd+R)   reload from disk, dropping unsaved changes
-//   ctrl+E (cmd+E)   export the Commandos mission (scene/game.odin)
+//   ctrl+E (cmd+E)   export the Commandos mission (scene/game.odin), the map
+//                    and the terrain into the level's build/
 //   drop a .json     open that level
 //
 // Never loses work by accident: a level that exists but was not opened is
@@ -27,8 +30,9 @@ import "core:time"
 
 import rl "vendor:raylib"
 
-import "mapgen"
-import "scene"
+import "../mapgen"
+import "../terrain"
+import "../scene"
 
 Level_State :: struct {
 	path:      string, // where ctrl+S writes; owned
@@ -94,16 +98,9 @@ level_set_path :: proc(lv: ^Level_State, path: string) {
 		level_say(lv, true, "%s exists but is not open: drop it on the window to open it (ctrl+S asks before overwriting)", path)
 	}
 	if len(lv.id) == 0 {
-		lv.id = strings.clone(filepath_stem(path))
+		lv.id = strings.clone(scene.level_id(path))
 		lv.title = strings.clone(lv.id)
 	}
-}
-
-filepath_stem :: proc(path: string) -> string {
-	name := path
-	if i := strings.last_index_any(name, "/\\"); i >= 0 do name = name[i + 1:]
-	if i := strings.last_index_byte(name, '.'); i > 0 do name = name[:i]
-	return name
 }
 
 // Reads and checks a level file; prints what it fixed. false: not usable (the
@@ -257,23 +254,6 @@ placement_add_placeholder :: proc(p: ^Placement, path: string) -> int {
 	return len(p.assets) - 1
 }
 
-// One line under the HUD: where the level goes and whether it is saved, and
-// the last message for a few seconds.
-draw_level_hud :: proc(lv: ^Level_State, dirty: bool, missing: int, cursor_game: Maybe([2]f32), x, y: i32) {
-	state := "unsaved changes" if dirty else ("saved" if len(lv.saved) > 0 else "not saved yet")
-	col := rl.Color{230, 170, 90, 255} if dirty else rl.Color{150, 200, 150, 255}
-	miss := fmt.tprintf(" | %d model%s missing (kept in the level)", missing, "" if missing == 1 else "s") if missing > 0 else ""
-	cursor := ""
-	if c, ok := cursor_game.?; ok do cursor = fmt.tprintf(" | cursor: game %.1f, %.1f", c.x, c.y)
-	rl.DrawText(
-		fmt.ctprintf("level %s | %s%s | [ctrl+S] save  [ctrl+R] reload  [ctrl+E] export mission%s", lv.path, state, miss, cursor),
-		x, y, 16, col,
-	)
-	if lv.msg_len > 0 && time.duration_seconds(time.since(lv.msg_at)) < CONFIRM_S {
-		mc := rl.Color{230, 110, 90, 255} if lv.msg_bad else rl.Color{230, 230, 230, 255}
-		rl.DrawText(fmt.ctprintf("%s", string(lv.message[:lv.msg_len])), x, y + 20, 16, mc)
-	}
-}
 
 // Opens a level: its capture (if not the one loaded), its terrain (if the
 // world scale or cell differ), models, objects and view. Nothing changes if it
@@ -318,7 +298,7 @@ open_level :: proc(
 	lv.confirm = .None
 	delete(lv.id)
 	delete(lv.title)
-	lv.id = strings.clone(l.id if len(l.id) > 0 else filepath_stem(path))
+	lv.id = strings.clone(l.id if len(l.id) > 0 else scene.level_id(path))
 	lv.title = strings.clone(l.title if len(l.title) > 0 else lv.id)
 	level_set_game(lv, l.game)
 	level_set_map(lv, l.map_section)
@@ -348,13 +328,12 @@ level_new :: proc(lv: ^Level_State, cloud_path: string) {
 // ---------------------------------------------------------------------------
 
 // The level's game section, or the one the first export will create: the
-// mission next to the level (<id>.mission.json, merged into
-// <id>.mission.base.json if that exists) and the whole terrain as the region.
+// mission in the level's build/ (merged into mission.base.json next to the
+// level if that exists) and the whole terrain as the region.
 level_game :: proc(lv: ^Level_State, p: ^Placement, wt: World_Terrain) -> (g: scene.Game, ok: bool) {
 	if have, has := lv.game.?; has do return have, true
-	id := lv.id if len(lv.id) > 0 else "level"
-	g.mission = fmt.tprintf("%s.mission.json", id)
-	g.base = fmt.tprintf("%s.mission.base.json", id)
+	g.mission = scene.build_file("mission.json")
+	g.base = "mission.base.json"
 	if wt.ok {
 		g.origin, g.size = scene.default_region(wt.t, p.world_scale)
 		return g, true
@@ -480,6 +459,16 @@ level_export :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, wt: Wo
 	if stats.grid_w * stats.grid_h > NAV_CELLS_HINT do append(&notes, fmt.tprintf("%dx%d m: large for the game's navigation, shrink \"size\" in the level", stats.grid_w, stats.grid_h))
 	if new_section do append(&notes, "region set: ctrl+S keeps it")
 	if len(map_note) > 0 do append(&notes, map_note)
+	// the terrain beside them, for tools/mapgen_check (not in git)
+	if wt.ok {
+		prefix := scene.resolve(lv.path, scene.build_file("terrain"), context.temp_allocator)
+		names, terr := terrain.export(wt.t, prefix, p.world_scale)
+		if terr != nil {
+			append(&notes, fmt.tprintf("terrain not written: %v", terr))
+		} else {
+			for n in names do delete(n)
+		}
+	}
 	level_say(lv, false, "exported %s: %d props, %d cover, %d buildings, %dx%d m%s%s",
 		mission_path, stats.props, stats.cover, stats.buildings, stats.grid_w, stats.grid_h,
 		" | " if len(notes) > 0 else "", strings.join(notes[:], " | ", context.temp_allocator))

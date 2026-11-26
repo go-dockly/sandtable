@@ -19,7 +19,7 @@ package scene
 //     "maxTilt": 20,                  degrees
 //     "nextId": 4,                    ids are never reused, also across sessions
 //     "view": { "target": [x, y, z], "azimuth": 45, "viewHeight": 0.8 },
-//     "game": { "mission": "krakow.mission.json", "base": "krakow.mission.base.json",
+//     "game": { "mission": "build/mission.json", "base": "mission.base.json",
 //               "origin": [x, z], "size": [w, h], "buildingsFromTerrain": true },
 //                                     the Commandos export, see game.odin
 //     "pixel": { "metres": 0.1, "scaleMin": 3, "scaleMax": 6 },

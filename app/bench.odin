@@ -3,7 +3,7 @@ package main
 // The speed test of the map spec's first slice: the splat backdrop plus 10
 // characters, at 60 fps on the hardware you target.
 //
-//   odin run . -o:speed -collection:cmd=../commandos -- levels/krakow.json --bench 30
+//   odin run app -out:sandtable -o:speed -collection:cmd=../commandos -- levels/krakow/level.json --bench 30
 //
 // The window renders the level as the game would, uncapped and without
 // vsync, with 10 characters walking the gameplay map (9 of them checking

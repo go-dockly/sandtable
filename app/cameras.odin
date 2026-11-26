@@ -78,10 +78,11 @@ ISO_DEG_PER_WHEEL :: f32(6)   // horizontal two-finger swipe rotation
 //   vertical scroll                 zoom
 //   horizontal two-finger swipe     rotate
 //   Left / Right arrow              rotate by 90 degrees
-iso_update :: proc(c: ^Iso, screen_h: f32, left_drag: bool) {
+// use_mouse: false while the mouse is on the UI's panels.
+iso_update :: proc(c: ^Iso, screen_h: f32, left_drag: bool, use_mouse := true) {
 	// raylib's GetMouseWheelMove returns whichever axis is larger, so on a
 	// trackpad a sideways swipe used to zoom. Split the axes.
-	wheel := rl.GetMouseWheelMoveV()
+	wheel := rl.GetMouseWheelMoveV() if use_mouse else {}
 	if wheel.y != 0 {
 		c.view_height = clamp(c.view_height * (1 - wheel.y * 0.1), c.min_height, c.max_height)
 	}
@@ -93,8 +94,8 @@ iso_update :: proc(c: ^Iso, screen_h: f32, left_drag: bool) {
 
 	shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 	left := rl.IsMouseButtonDown(.LEFT)
-	pan := (shift && left) || rl.IsMouseButtonDown(.RIGHT) || rl.IsMouseButtonDown(.MIDDLE)
-	rotate := left && !shift && left_drag
+	pan := use_mouse && ((shift && left) || rl.IsMouseButtonDown(.RIGHT) || rl.IsMouseButtonDown(.MIDDLE))
+	rotate := use_mouse && left && !shift && left_drag
 
 	if pan || rotate {
 		mouse := rl.GetMousePosition()
@@ -138,7 +139,8 @@ frame_camera :: proc(camera: ^rl.Camera3D, v: Splat_View) {
 }
 
 // left_drag: as iso_update, orbit only once a left press is a drag
-update_orbit :: proc(c: ^rl.Camera3D, left_drag: bool) {
+update_orbit :: proc(c: ^rl.Camera3D, left_drag: bool, use_mouse := true) {
+	if !use_mouse do return
 	d := c.position - c.target
 	dist := linalg.vector_length(d)
 	yaw := math.atan2(d.x, d.z)

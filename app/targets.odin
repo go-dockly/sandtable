@@ -11,7 +11,7 @@ package main
 
 import rl "vendor:raylib"
 
-import "scene"
+import "../scene"
 
 PIXEL_SIZE_FREE :: 4 // screen pixels per art pixel, free camera
 
@@ -47,8 +47,8 @@ Pixel_Tune :: struct {
 //   0      the zoom-in end: this view, this pixel size
 // 9 and 0 write the level's pixel section; ctrl+S saves it. scale: the
 // current screen pixels per art pixel.
-pixel_keys :: proc(lv: ^Level_State, tune: ^Pixel_Tune, iso: Iso, world_scale, win_h, scale: f32) {
-	if rl.IsKeyPressed(.EIGHT) {
+pixel_keys :: proc(ui: ^Ui, lv: ^Level_State, tune: ^Pixel_Tune, iso: Iso, world_scale, win_h, scale: f32) {
+	if ui_key(ui, .EIGHT) {
 		tune.on = !tune.on
 		tune.scale = scale
 		level_say(lv, false, "pixel tuning %s", "on: zoom anywhere, -/= pixel size, 9 / 0 store an end" if tune.on else "off")
@@ -59,7 +59,7 @@ pixel_keys :: proc(lv: ^Level_State, tune: ^Pixel_Tune, iso: Iso, world_scale, w
 		lim := scene.PIXEL_ROWS_LIMITS
 		tune.scale = clamp(tune.scale, win_h / lim[1], win_h / lim[0])
 	}
-	nine, zero := rl.IsKeyPressed(.NINE), rl.IsKeyPressed(.ZERO)
+	nine, zero := ui_key(ui, .NINE), ui_key(ui, .ZERO)
 	if !nine && !zero do return
 	p := level_pixel(lv, iso, world_scale)
 	end := scene.Pixel_End{view = iso.view_height / max(world_scale, 1e-9), rows = win_h / max(scale, 1e-6)}

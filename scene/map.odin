@@ -5,7 +5,7 @@ package scene
 // level stays the source of truth:
 //
 //   "map": {
-//     "file": "krakow.map.json",   written by the export, next to the level
+//     "file": "build/map.json",    written by the export, in the level's build/
 //     "cell": 1,                   metres
 //     "yaw": 20,                   the frame's turn, degrees: measured on the
 //                                  first build, then kept, so nothing typed in

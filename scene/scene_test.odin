@@ -196,8 +196,12 @@ paths_relative_to_the_level :: proc(t: ^testing.T) {
 	testing.expect(t, same_path("./models/terrain/krakow.spz", "models/x/../terrain/krakow.spz"))
 	testing.expect(t, !same_path("models/a.spz", "levels/a.spz"))
 
-	testing.expect(t, default_level_path("./models/terrain/krakow.spz", context.temp_allocator) == "levels/krakow.json")
-	testing.expect(t, autosave_path("levels/krakow.json", context.temp_allocator) == "levels/krakow.autosave.json")
+	testing.expect(t, default_level_path("./models/terrain/krakow.spz", context.temp_allocator) == "levels/krakow/level.json")
+	testing.expect(t, autosave_path("levels/krakow/level.json", context.temp_allocator) == "levels/krakow/level.autosave.json")
+	testing.expect_value(t, level_id("levels/krakow/level.json"), "krakow")
+	testing.expect_value(t, level_id("levels\\wawel\\level.json"), "wawel")
+	testing.expect_value(t, level_id("level.json"), "level")
+	testing.expect_value(t, level_id("my/old.json"), "old")
 }
 
 @(test)
@@ -282,4 +286,22 @@ map_section_round_trip :: proc(t: ^testing.T) {
 	again := encode(back)
 	defer delete(again)
 	testing.expect(t, strings.count(again, "\"kind\"") == 4, "four edits")
+}
+
+@(test)
+list_levels_finds_level_folders :: proc(t: ^testing.T) {
+	root :: "/tmp/sandtable_list_levels"
+	os.remove_all(root)
+	defer os.remove_all(root)
+	for d in ([]string{"wawel", "krakow", "empty"}) do os.make_directory_all(strings.concatenate({root, "/", d}, context.temp_allocator))
+	_ = os.write_entire_file(root + "/krakow/level.json", []byte{'{', '}'})
+	_ = os.write_entire_file(root + "/wawel/level.json", []byte{'{', '}'})
+	_ = os.write_entire_file(root + "/stray.json", []byte{'{', '}'})
+	got := list_levels(root, context.temp_allocator)
+	testing.expect_value(t, len(got), 2)
+	if len(got) == 2 {
+		testing.expect_value(t, got[0], root + "/krakow/level.json")
+		testing.expect_value(t, got[1], root + "/wawel/level.json")
+	}
+	testing.expect_value(t, len(list_levels("/tmp/sandtable_no_such_dir", context.temp_allocator)), 0)
 }

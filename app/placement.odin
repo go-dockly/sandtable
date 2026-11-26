@@ -54,8 +54,8 @@ import "core:strings"
 
 import rl "vendor:raylib"
 
-import "editor"
-import "terrain"
+import "../editor"
+import "../terrain"
 
 Transform :: editor.Transform
 Snap :: editor.Snap
@@ -82,12 +82,12 @@ Placement :: struct {
 
 // Command line. The cloud is the first argument that is not a flag.
 //
-//   odin run . -- ../ospz/models/krakow.spz --model assets/models/car/volkswagen_typ-82.glb
+//   odin run app -out:sandtable -collection:cmd=../commandos -- ../ospz/models/krakow.spz --model assets/models/car/volkswagen_typ-82.glb
 //                 [--world-scale u] [--pos x,y,z] [--yaw degrees] [--scale s] [--ground y]
 //                 [--snap ground|surface|plane] [--offset y] [--align] [--max-tilt degrees]
 //                 [--cell metres] [--terrain-export prefix] [--level file.json]
 //                 [--bench seconds] [--bench-out stats.json]
-//   odin run . -- levels/krakow.json    (a level: its capture, models and objects)
+//   odin run app -out:sandtable -collection:cmd=../commandos -- levels/krakow/level.json    (a level: its capture, models and objects)
 //
 // --world-scale is world units per metre (default 1). --pos sets the ground
 // plane to its y (snapping to the terrain ignores that y). --ground alone keeps

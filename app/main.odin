@@ -7,8 +7,8 @@ package main
 //     sandtable/    <- this directory
 //
 //   cd sandtable
-//   odin run . -- ../ospz/models/tree.ply
-//   odin run . -- ../ospz/models/krakow.spz --model assets/models/car/volkswagen_typ-82.glb
+//   odin run app -out:sandtable -collection:cmd=../commandos -- ../ospz/models/tree.ply
+//   odin run app -out:sandtable -collection:cmd=../commandos -- ../ospz/models/krakow.spz --model assets/models/car/volkswagen_typ-82.glb
 //
 // Pass 1 draws the splat cloud into an off-screen target at ss x the art
 // resolution (premultiplied RGBA, transparent where nothing was drawn).
@@ -27,7 +27,6 @@ package main
 // the splats.
 
 import "core:fmt"
-import "core:math"
 import "core:math/linalg"
 import "core:os"
 import "core:strings"
@@ -36,10 +35,10 @@ import "core:time"
 import rl "vendor:raylib"
 import rlgl "vendor:raylib/rlgl"
 
-import "editor"
-import "scene"
-import "artgrid"
-import "splatsort"
+import "../editor"
+import "../scene"
+import "../artgrid"
+import "../splatsort"
 
 BACKGROUND :: [4]u8{16, 14, 20, 255}
 
@@ -168,6 +167,11 @@ main :: proc() {
 	upscale: Upscale
 	upscale_init(&upscale)
 	defer upscale_destroy(&upscale)
+	ui: Ui
+	ui_init(&ui)
+	defer ui_destroy(&ui)
+	ps: Panels
+	defer panels_destroy(&ps)
 	crisp_alpha := f32(0.35)
 	palette_mode := Palette_Mode.Extracted
 	game_cam := true
@@ -208,6 +212,7 @@ main :: proc() {
 		rl.ClearWindowState({.VSYNC_HINT})
 		rl.SetTargetFPS(0)
 		game_cam = true
+		ui.visible = false // the panels are not what is measured
 		world_map_build(&game_map, &lv, &placement, ground_proxy, model_shader.shader)
 		bench_start(&bench, &game_map, iso, int(cfg.ss), int(view.count))
 		fmt.printfln("bench: %d phases of %.0f s, each after %.0f s of warm-up%s", len(BENCH_PHASES), bench_phase_seconds(&bench), BENCH_WARMUP,
@@ -217,7 +222,19 @@ main :: proc() {
 	for !rl.WindowShouldClose() {
 		if bench.seconds > 0 && bench_frame(&bench, &game_map, &iso, placement.world_scale) do break
 		if bench.ok do cfg.ss = type_of(cfg.ss)(bench_ss(&bench))
+		ui_begin(&ui)
+		ui_mouse := ui_has_mouse(&ui)
 		// ---- input ---------------------------------------------------------
+		// a level picked in the panels opens like a dropped one
+		if len(ps.open_level) > 0 {
+			if m, ok := open_level(ps.open_level, &view, &cloud_path, &free_cam, &iso, &placement, &ground_proxy, &lv, model_shader.shader); ok {
+				missing = m
+				load_err = .None
+				last_fwd = {}
+				apply_palette(&post, palette_mode, view, placement_colors(&placement))
+			}
+			ps.open_level = ""
+		}
 		if rl.IsFileDropped() {
 			files := rl.LoadDroppedFiles()
 			if files.count > 0 {
@@ -270,13 +287,13 @@ main :: proc() {
 			last_fwd = {}
 		}
 		// ---- level -----------------------------------------------------------
-		if cmd && rl.IsKeyPressed(.S) {
+		if ui_key(&ui, .S, cmd = true) {
 			level_save(&lv, &placement, cloud_path, ground_proxy.cell_m, iso)
 		}
-		if cmd && rl.IsKeyPressed(.E) {
+		if ui_key(&ui, .E, cmd = true) {
 			level_export(&lv, &placement, cloud_path, ground_proxy, &game_map, model_shader.shader)
 		}
-		if cmd && rl.IsKeyPressed(.R) {
+		if ui_key(&ui, .R, cmd = true) {
 			switch {
 			case !os.exists(lv.path):
 				level_say(&lv, true, "%s: nothing saved yet", lv.path)
@@ -291,11 +308,11 @@ main :: proc() {
 				}
 			}
 		}
-		if rl.IsKeyPressed(.C) {
+		if ui_key(&ui, .C) {
 			game_cam = !game_cam
 			last_fwd = {}
 		}
-		if rl.IsKeyPressed(.P) {
+		if ui_key(&ui, .P) {
 			if palette_mode == .Extracted {
 				palette_mode = .Commandos
 			} else {
@@ -304,12 +321,16 @@ main :: proc() {
 			apply_palette(&post, palette_mode, view, placement_colors(&placement))
 		}
 		shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
-		if rl.IsKeyPressed(.Z) && shift && !cmd {
+		if (rl.IsKeyPressed(.Z) && shift && !cmd) || ps.rebuild {
+			ps.rebuild = false
 			world_terrain_build(&ground_proxy, view, placement.world_scale, model_shader.shader)
 			if ground_proxy.view == .Map do world_map_build(&game_map, &lv, &placement, ground_proxy, model_shader.shader)
 		}
-		if rl.IsKeyPressed(.TAB) {
-			ground_proxy.view = Terrain_View((int(ground_proxy.view) + 1) % len(Terrain_View))
+		next_view: Maybe(Terrain_View) = ps.want_view
+		ps.want_view = nil
+		if rl.IsKeyPressed(.TAB) do next_view = Terrain_View((int(ground_proxy.view) + 1) % len(Terrain_View))
+		if v, ok := next_view.?; ok && v != ground_proxy.view {
+			ground_proxy.view = v
 			if ground_proxy.view == .Map do world_map_build(&game_map, &lv, &placement, ground_proxy, model_shader.shader)
 		}
 		// toggles, same letters as pixlsplat
@@ -340,7 +361,7 @@ main :: proc() {
 			if tune.on do lo, hi = lo / TUNE_REACH, hi * TUNE_REACH
 			iso.min_height, iso.max_height = lo, hi
 			// the bench drives the camera itself: input would skew its phases
-			if !bench.ok do iso_update(&iso, win.y, left_drag)
+			if !bench.ok do iso_update(&iso, win.y, left_drag, use_mouse = !ui_mouse)
 			iso.view_height = clamp(iso.view_height, lo, hi)
 			// art rows across the window: between the ends, or held while tuning
 			rows := win.y / tune.scale if tune.on else scene.pixel_rows(px, iso.view_height / ws)
@@ -355,9 +376,9 @@ main :: proc() {
 			camera.target += shift
 			camera.position += shift
 			camera.fovy = f32(grid.h) / density
-			if !bench.ok && !cmd do pixel_keys(&lv, &tune, iso, ws, win.y, grid.scale)
+			if !bench.ok && !cmd do pixel_keys(&ui, &lv, &tune, iso, ws, win.y, grid.scale)
 		} else {
-			update_orbit(&free_cam, left_drag)
+			update_orbit(&free_cam, left_drag, use_mouse = !ui_mouse)
 			camera = free_cam
 			grid = artgrid.fixed({rl.GetScreenWidth(), rl.GetScreenHeight()}, PIXEL_SIZE_FREE, camera.target)
 		}
@@ -386,7 +407,7 @@ main :: proc() {
 		mouse := rl.GetMousePosition()
 		on_picture := mouse.x >= max(0, pic.x) && mouse.y >= max(0, pic.y) && mouse.x < min(pic.x + pic.width, win.x) && mouse.y < min(pic.y + pic.height, win.y)
 		ray, ray_ok := editor.screen_ray(linalg.inverse(proj_m * view_m), editor.ndc_from_screen(mouse - {pic.x, pic.y}, pic.width, pic.height))
-		placement_mouse(&placement, ray, ray_ok && on_picture, mouse, ground_proxy.t, ground_proxy.ok)
+		placement_mouse(&placement, ray, ray_ok && on_picture && !ui_mouse, mouse, ground_proxy.t, ground_proxy.ok)
 		placement_settle(&placement, ground_proxy.t, ground_proxy.ok)
 		if lv.baseline { // just opened: what "saved" looks like, once settled
 			delete(lv.saved)
@@ -467,53 +488,18 @@ main :: proc() {
 		draw_placement_overlay(&placement, view_m, proj_m, pic.width, pic.height, ground_proxy.t, ground_proxy.ok)
 		rl.EndMode2D()
 
-		title := view.name if len(view.name) > 0 else path
-		rl.DrawText(fmt.ctprintf("%s", title), 10, 10, 20, rl.RAYWHITE)
-		if load_err != .None {
-			rl.DrawText(fmt.ctprintf("load failed: %v", load_err), 10, 35, 18, {230, 90, 80, 255})
-		} else {
-			rl.DrawText(
-				fmt.ctprintf(
-					"%d splats | %s camera | pixel %.2fx%s, out %.0f m %.1fx, in %.0f m %.1fx%s (%dx%d art, ss %d) | %d fps",
-					view.count,
-					"game" if game_cam else "free",
-					grid.scale,
-					" TUNING" if tune.on else "",
-					px.out.view,
-					win.y / px.out.rows,
-					px.in_.view,
-					win.y / px.in_.rows,
-					"" if lv.pixel != nil else " (default)",
-					targets.w,
-					targets.h,
-					cfg.ss,
-					rl.GetFPS(),
-				),
-				10, 35, 18, {180, 180, 180, 255},
-			)
-		}
-		rl.DrawText(
-			fmt.ctprintf(
-				"[Q] palette %s  [X] hard %s  [E] outline %s  [D] dither %.1f  [P] colours %v  [G] grade %.1f  [ [ ] ] alpha cut %.2f",
-				"on" if cfg.quant else "off",
-				"on" if cfg.crisp else "off",
-				"on" if cfg.outline else "off",
-				cfg.dither,
-				palette_mode,
-				cfg.grade,
-				crisp_alpha,
-			),
-			10, 58, 16, {180, 180, 180, 255},
-		)
-		rl.DrawText(
-			"[C] camera  [S] ss  [R] reset | game: drag/arrows rotate, shift/right-drag pan, scroll zoom, [8] tune pixels: [-/=] size, [9]/[0] store zoom-out / zoom-in end | free: drag orbit",
-			10, 78, 16, {160, 160, 160, 255},
-		)
-		px_per_unit := f32(targets.h) / camera.fovy if game_cam else 0
-		draw_model_hud(&placement, model_err, px_per_unit, 10, 98)
-		draw_terrain_hud(ground_proxy, &placement, 10, 178)
-		draw_level_hud(&lv, dirty, missing, level_cursor_game(&lv, &placement, ground_proxy), 10, 218)
-		if ground_proxy.view == .Map do draw_map_hud(&game_map, &lv, 10, 238)
+		panels(&ui, &ps, Ui_Env{
+			lv = &lv, p = &placement, wt = &ground_proxy, wm = &game_map,
+			cfg = &cfg, crisp_alpha = &crisp_alpha, grade = &grade_strength, tune = &tune,
+			palette = palette_mode, game_cam = game_cam, px = px, grid = grid,
+			view_height = iso.view_height, world_scale = ws, win = win, splats = int(view.count),
+			title = view.name if len(view.name) > 0 else path,
+			load_err = fmt.tprintf("load failed: %v", load_err) if load_err != .None else "",
+			model_err = model_err, dirty = dirty, missing = missing,
+			cursor_game = level_cursor_game(&lv, &placement, ground_proxy),
+		})
+		ui_end(&ui)
+		draw_message(&ui, &lv, win)
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 	}
@@ -524,80 +510,3 @@ main :: proc() {
 	level_autosave(&lv, &placement, cloud_path, ground_proxy.cell_m, iso)
 }
 
-// px_per_unit: art pixels per world unit in the game camera, 0 in the free one
-draw_model_hud :: proc(p: ^Placement, err: string, px_per_unit: f32, x, y: i32) {
-	info := rl.Color{220, 200, 140, 255}
-	keys := rl.Color{160, 160, 160, 255}
-	if len(err) > 0 {
-		rl.DrawText(fmt.ctprintf("model load failed: %s", err), x, y, 18, {230, 90, 80, 255})
-		return
-	}
-	if len(p.assets) == 0 {
-		rl.DrawText("no object: --model file.glb, or drop a .glb", x, y, 16, keys)
-		return
-	}
-
-	// mode line
-	ed := &p.ed
-	n := len(ed.instances)
-	plural := "" if n == 1 else "s"
-	mode: string
-	switch ed.mode {
-	case .Place:
-		a := asset_of(p, ed.preview)
-		mode = fmt.tprintf(
-			"PLACE %s | click: put one down  Esc: stop | %d object%s%s",
-			a.path if a != nil else "?", n, plural, "" if p.cursor_ok else " | cursor off the ground",
-		)
-	case .Move:
-		mode = fmt.tprintf("MOVE #%d | click: put it down  Esc: undo the move | %d object%s", ed.selected, n, plural)
-	case .Select:
-		sel := fmt.tprintf("#%d selected", ed.selected) if ed.selected != 0 else "nothing selected"
-		hover := fmt.tprintf(" | under the cursor: #%d", p.hover) if p.hover != 0 && p.hover != ed.selected else ""
-		mode = fmt.tprintf("SELECT | %d object%s, %s%s", n, plural, sel, hover)
-	}
-	history := fmt.tprintf(" | [ctrl+Z] undo %d  [ctrl+shift+Z] redo %d", editor.can_undo(ed), editor.can_redo(ed))
-	rl.DrawText(fmt.ctprintf("%s%s%s", mode, "" if p.visible else " | hidden", history), x, y, 16, {140, 220, 255, 255})
-
-	act := editor.active(ed)
-	a: ^Model_Asset
-	if act != nil do a = asset_of(p, act^)
-	if act == nil || a == nil {
-		rl.DrawText(
-			fmt.ctprintf("click an object to select it | world %.6f units/m", p.world_scale),
-			x, y + 20, 16, info,
-		)
-	} else {
-		t := act.transform
-		yaw := editor.wrap_yaw(t.rotation.y) * math.DEG_PER_RAD
-		sz := object_size_m(a^, t)
-		px := ""
-		if px_per_unit > 0 {
-			long_px := max(sz.x, sz.z) * p.world_scale * px_per_unit
-			px = fmt.tprintf(" | ~%.0f art px long, 1 m = %.1f px", long_px, p.world_scale * px_per_unit)
-		}
-		other := fmt.tprintf("  [O] next of %d models", len(p.assets)) if len(p.assets) > 1 else ""
-		rl.DrawText(
-			fmt.ctprintf(
-				"%s | %.2f x %.2f x %.2f m (x y z) | scale %.3f | yaw %.0f%s%s",
-				a.path, sz.x, sz.y, sz.z, t.scale.x, yaw, px, other,
-			),
-			x, y + 20, 16, info,
-		)
-		f := world_fmt(p.world_scale)
-		foot_m := max(sz.x, sz.z)
-		rl.DrawText(
-			fmt.ctprintf(
-				"world %.6f units/m | pos %s %s %s | ground %s | grid %v m",
-				p.world_scale,
-				fmt.tprintf(f, t.position.x), fmt.tprintf(f, t.position.y), fmt.tprintf(f, t.position.z),
-				fmt.tprintf(f, act.ground), grid_cell_m(max(foot_m, 1e-3) * 2),
-			),
-			x, y + 40, 16, info,
-		)
-	}
-	rl.DrawText(
-		"click select / place  [A] place  [W] move  [Del] delete  [Esc] cancel | [IJKL] nudge  [Y/H] offset  [,/.] rotate (shift 90)  [N/M] scale  [ctrl+N/M] world  [T] reset  [B] overlay  [V] hide  [F] flags",
-		x, y + 60, 16, keys,
-	)
-}

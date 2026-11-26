@@ -22,11 +22,11 @@ import "core:math"
 import "core:os"
 import "core:slice"
 
-import ospz "../ospz"
+import ospz "../../ospz"
 import rl "vendor:raylib"
 import rlgl "vendor:raylib/rlgl"
 
-import "splatsort"
+import "../splatsort"
 
 DATA_W :: 1024
 ORDER_W :: 1024
