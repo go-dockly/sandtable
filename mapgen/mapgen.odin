@@ -9,7 +9,8 @@ package mapgen
 //   2. sample    ground, surface, the lowest splats and the class, per map
 //                cell, through the aligned frame
 //   3. clean     structures: one-cell gaps closed, holes under `hole` filled,
-//                specks under `speck` dropped
+//                specks under `speck` dropped; touching structures split
+//                where their tops step by more than `split_step`
 //   4. classify  each structure: a wall is thin, a tree shows ground under
 //                it or is rough on top, the rest are buildings
 //   5. features  buildings as squared footprints with one clean flat roof
@@ -45,7 +46,8 @@ Params :: struct {
 	hole:        f32,        // m²: smaller holes in structures are filled
 	sees_ground: f32,        // metres: a structure cell whose lowest splats are this close to the ground shows ground under it
 	tree_ground: f32,        // share of such cells that makes a structure a tree
-	tree_rough:  f32,        // metres: a mean step between neighbouring cells' tops this big makes it a tree
+	tree_rough:  f32,        // metres: tops this curved (mean second difference between neighbours) make it a tree; an even slope (a gable) is not curved
+	split_step:  f32,        // metres: touching structures whose tops differ by more are separate buildings
 	wall_width:  f32,        // metres: a structure this thin is a wall
 	low_height:  f32,        // metres: a low solid (an object cell) this tall is cover
 }
@@ -58,7 +60,8 @@ default_params :: proc() -> Params {
 		hole        = 1,
 		sees_ground = 1.5,
 		tree_ground = 0.35,
-		tree_rough  = 0.6,
+		tree_rough  = 0.8,
+		split_step  = 2,
 		wall_width  = 2.5,
 		low_height  = 0.5,
 	}
@@ -169,9 +172,30 @@ build :: proc(in_: Input) -> (m: gamemap.Map, stats: Stats) {
 	}
 
 	// ---- 3. clean ----------------------------------------------------------------
+	measured := make([]bool, n, context.temp_allocator)
+	copy(measured, solid)
 	close_gaps(solid, w, h)
 	fill_small(solid, w, h, int(p.hole / (p.cell * p.cell)))
-	labels, count := label(solid, w, h)
+	// a closed gap or filled hole has no top of its own: its neighbours'
+	for c in 0 ..< n {
+		if !solid[c] || measured[c] do continue
+		x, y := c % w, c / w
+		sum, got := f32(0), 0
+		for dy in -1 ..= 1 {
+			for dx in -1 ..= 1 {
+				nx, ny := x + dx, y + dy
+				if nx < 0 || ny < 0 || nx >= w || ny >= h || !measured[ny * w + nx] do continue
+				sum += top[ny * w + nx]
+				got += 1
+			}
+		}
+		if got > 0 do top[c] = sum / f32(got)
+	}
+	// touching buildings apart where their tops step: a dense old town is
+	// one region of structure otherwise
+	// Only what is thicker than a wall is split: a wall is all rim and step,
+	// nothing to split
+	labels, count := split_thick(solid, top, seen, w, h, p)
 
 	// ---- 4, 5. classify, features ----------------------------------------------
 	Comp :: struct {
@@ -215,19 +239,14 @@ build :: proc(in_: Input) -> (m: gamemap.Map, stats: Stats) {
 		inner :: proc(in_comp: map[int]bool, c, w: int) -> bool {
 			return (c - 1) in in_comp && (c + 1) in in_comp && (c - w) in in_comp && (c + w) in in_comp
 		}
+		// curvature, not slope: |left + right - 2 centre| along both axes
 		rough, pairs, inners := f32(0), 0, 0
 		for c in cells {
 			if !inner(in_comp, c, w) do continue
 			inners += 1
 			if seen[c] do saw += 1
-			if inner(in_comp, c + 1, w) {
-				rough += abs(top[c] - top[c + 1])
-				pairs += 1
-			}
-			if inner(in_comp, c + w, w) {
-				rough += abs(top[c] - top[c + w])
-				pairs += 1
-			}
+			rough += abs(top[c - 1] + top[c + 1] - 2 * top[c]) + abs(top[c - w] + top[c + w] - 2 * top[c])
+			pairs += 2
 		}
 		if pairs > 0 do rough /= f32(pairs)
 
@@ -372,13 +391,24 @@ frame_for :: proc(origin, size: [2]f32, yaw, world_scale, ground: f32) -> gamema
 // structures.
 edge_direction :: proc(t: terrain.Terrain) -> f32 {
 	w, h := t.w, t.h
+	step := t.params.structure_height if t.params.structure_height > 0 else t.cell * 4
 	pts := make([dynamic][2]f32, context.temp_allocator)
 	for z in 1 ..< h - 1 {
 		for x in 1 ..< w - 1 {
 			c := z * w + x
 			if t.class[c] != .Structure do continue
+			// a wall: the structure meets the street, or a roof steps down to
+			// the next one. Not where the capture ends (no data): its outline
+			// is the drone's flight, not the streets
 			edge := false
-			for d in ([4]int{1, -1, w, -w}) do if t.class[c + d] != .Structure do edge = true
+			for d in ([4]int{1, -1, w, -w}) {
+				#partial switch t.class[c + d] {
+				case .Ground, .Object:
+					edge = true
+				case .Structure:
+					if abs(t.surface[c + d] - t.surface[c]) > step do edge = true
+				}
+			}
 			if edge do append(&pts, [2]f32{f32(x), f32(z)})
 		}
 	}
@@ -460,6 +490,134 @@ fill_small :: proc(mask: []bool, w, h, max_cells: int) {
 	for l, i in labels {
 		if l > 0 && !border[l] && size[l] <= max_cells do mask[i] = true
 	}
+}
+
+// Plain components, then those thicker than a wall split by label_split.
+split_thick :: proc(solid: []bool, top: []f32, seen: []bool, w, h: int, p: Params) -> (labels: []i32, count: int) {
+	plain, n := label(solid, w, h)
+	cells := make([]int, n + 1, context.temp_allocator)
+	box := make([][4]int, n + 1, context.temp_allocator) // x0, y0, x1, y1
+	for &b in box do b = {max(int), max(int), min(int), min(int)}
+	for l, c in plain {
+		if l == 0 do continue
+		x, y := c % w, c / w
+		cells[l] += 1
+		b := &box[l]
+		b^ = {min(b[0], x), min(b[1], y), max(b[2], x), max(b[3], y)}
+	}
+	thick := make([]bool, len(solid), context.temp_allocator)
+	is_thick := make([]bool, n + 1, context.temp_allocator)
+	for l in 1 ..= n {
+		b := box[l]
+		is_thick[l] = thickness(cells[l], b[2] - b[0] + 1, b[3] - b[1] + 1, p.cell) > p.wall_width
+	}
+	for l, c in plain do thick[c] = l > 0 && is_thick[l]
+	labels, count = label_split(thick, top, seen, w, h, p.split_step)
+	// the thin ones keep their plain components, numbered after
+	renumber := make([]i32, n + 1, context.temp_allocator)
+	for l, c in plain {
+		if l == 0 || is_thick[l] do continue
+		if renumber[l] == 0 {
+			count += 1
+			renumber[l] = i32(count)
+		}
+		labels[c] = renumber[l]
+	}
+	return
+}
+
+// Components like label, but split where the tops step by more than
+// `split`: touching buildings of different heights come apart.
+//
+// A cell on a step (its neighbours either side differ by more than `split`:
+// a map cell across the line between two roofs reads a height in between)
+// and a rim cell (next to the street, half street) join the region next to
+// them but pass nothing on, so a chain of in-between heights never bridges
+// two buildings. Cells inside that both show ground under them (a canopy:
+// rough on top, the ground only partly hidden) always join.
+label_split :: proc(mask: []bool, top: []f32, seen: []bool, w, h: int, split: f32) -> (labels: []i32, count: int) {
+	labels = make([]i32, len(mask), context.temp_allocator)
+	stack := make([dynamic]int, context.temp_allocator)
+	edge := make([]bool, len(mask), context.temp_allocator)
+	rims := make([]bool, len(mask), context.temp_allocator)
+	for c in 0 ..< len(mask) {
+		if !mask[c] do continue
+		rims[c] = rim(mask, w, h, c)
+		edge[c] = rims[c]
+		x, y := c % w, c / w
+		if x > 0 && x < w - 1 && mask[c - 1] && mask[c + 1] && abs(top[c + 1] - top[c - 1]) > split do edge[c] = true
+		if y > 0 && y < h - 1 && mask[c - w] && mask[c + w] && abs(top[c + w] - top[c - w]) > split do edge[c] = true
+	}
+	// seeds from the inside first, so the edges go to the buildings they
+	// border; edges left over (a thin thing is all edge) group among themselves
+	inside_count := 0
+	for pass in 0 ..< 2 do for start in 0 ..< len(mask) {
+		if pass == 1 && inside_count == 0 do inside_count = max(count, 0) if count > 0 else -1
+		if !mask[start] || labels[start] != 0 do continue
+		if pass == 0 && edge[start] do continue
+		count += 1
+		labels[start] = i32(count)
+		append(&stack, start)
+		for len(stack) > 0 {
+			c := pop(&stack)
+			x, y := c % w, c / w
+			for d in ([4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+				nx, ny := x + d.x, y + d.y
+				if nx < 0 || ny < 0 || nx >= w || ny >= h do continue
+				q := ny * w + nx
+				if !mask[q] || labels[q] != 0 do continue
+				join: bool
+				switch {
+				case seen[c] && seen[q] && !rims[c] && !rims[q]:
+					join = true // a canopy
+				case !edge[c] && edge[q]:
+					join = true // the edge goes with the inside it borders
+				case edge[c] && !edge[q]:
+					join = false // and passes nothing on
+				case pass == 1 && rims[c] && rims[q]:
+					join = true // a thin thing, all rim: its rim is all there is
+				case:
+					join = abs(top[q] - top[c]) <= split
+				}
+				if !join do continue
+				labels[q] = i32(count)
+				append(&stack, q)
+			}
+		}
+	}
+	// a group of edges only (a building's corner, left over) that touches a
+	// building joins it: the one whose top along the touch is closest
+	if inside_count > 0 && count > inside_count {
+		best := make([]i32, count + 1, context.temp_allocator)
+		best_d := make([]f32, count + 1, context.temp_allocator)
+		for &v in best_d do v = max(f32)
+		for c in 0 ..< len(mask) {
+			l := labels[c]
+			if int(l) <= inside_count do continue
+			x, y := c % w, c / w
+			for d in ([4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+				nx, ny := x + d.x, y + d.y
+				if nx < 0 || ny < 0 || nx >= w || ny >= h do continue
+				q := ny * w + nx
+				if labels[q] == 0 || int(labels[q]) > inside_count do continue
+				if dd := abs(top[q] - top[c]); dd < best_d[l] {
+					best[l], best_d[l] = labels[q], dd
+				}
+			}
+		}
+		for &l in labels do if int(l) > inside_count && best[l] > 0 do l = best[l]
+	}
+	return
+}
+
+@(private)
+rim :: proc(mask: []bool, w, h, c: int) -> bool {
+	x, y := c % w, c / w
+	for d in ([4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+		nx, ny := x + d.x, y + d.y
+		if nx < 0 || ny < 0 || nx >= w || ny >= h || !mask[ny * w + nx] do return true
+	}
+	return false
 }
 
 // 4-connected components in scan order, 1-based; 0 for unset cells.

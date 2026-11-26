@@ -2,6 +2,7 @@ sandtable
 sandtable.exe
 *.bin
 *.pdb
+# *.pgm
 models/
 *.autosave.json
 *.json.tmp

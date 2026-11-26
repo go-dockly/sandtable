@@ -208,10 +208,10 @@ The game plays on a map that is never drawn: a layered grid that decides where c
 
 The automatic map, in a fixed order, so the same capture always gives the same map:
 
-1. **Align.** The direction the structures' edges line up best becomes the frame's yaw, so buildings come out square on the grid. Measured on the first export and then kept in the level, so nothing in map metres ever shifts.
+1. **Align.** The direction the walls line up best becomes the frame's yaw, so buildings come out square on the grid. Walls are where a structure meets the street or a roof steps down to the next one; where the capture simply ends doesn't count, since its outline is the drone's flight. Measured on the first export and then kept in the level (`"yaw"` in its `map` section), so nothing in map metres ever shifts: delete that line to measure again.
 2. **Sample** ground, tops, the lowest splats and the class per map cell (1 m by default, `"cell"`).
-3. **Clean.** One-cell gaps closed, small holes filled, specks under 2 m² dropped.
-4. **Classify.** Thinner than 2.5 m (its area over its length): a wall. Ground showing under it, or a rough top: a tree. Otherwise a building. Lower things the terrain classes as objects, 0.5 to 2 m tall (low walls, hedges, parked cars), become low walls or volumes: cover that hides someone crouching.
+3. **Clean.** One-cell gaps closed, small holes filled, specks under 2 m² dropped. Buildings wall to wall (an old town is one region of structure) are split where their roofs step by more than 2 m; a gable's even slope doesn't split it.
+4. **Classify.** Thinner than 2.5 m (its area over its length): a wall. Ground showing under it, or a bumpy top (curved, not just sloping, so a gable roof stays a building): a tree. Otherwise a building. Lower things the terrain classes as objects, 0.5 to 2 m tall (low walls, hedges, parked cars), become low walls or volumes: cover that hides someone crouching.
 5. **Features.** Buildings: squared footprints (a rectangle when they nearly fill their box; courtyards are holes) with one flat roof height. Trees: a trunk that blocks movement and a canopy you see under. Placed objects: props, so a car blocks sight without hand editing.
 6. **Ground.** The bare ground is layer 0; slopes over 35° are not walkable.
 

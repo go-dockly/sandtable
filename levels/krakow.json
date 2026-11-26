@@ -7,17 +7,18 @@
   "worldScale": 0.005,
   "terrainCell": 0,
   "maxTilt": 20,
-  "nextId": 7,
-  "view": { "target": [-0.001953125, 0.08569336, -0.03540039], "azimuth": 117.59998, "viewHeight": 0.25239992 },
+  "nextId": 2,
+  "view": { "target": [-0.016732316, 0.08569336, -0.014106343], "azimuth": 167.99963, "viewHeight": 0.5184886 },
+  "game": { "mission": "krakow.mission.json", "base": "krakow.mission.base.json", "origin": [-0.3450879, -0.3968457], "size": [135, 151], "buildingsFromTerrain": true },
+  "map": {
+    "file": "krakow.map.json",
+    "cell": 1,
+    "edits": []
+  },
   "assets": [
     { "id": "volkswagen_82", "path": "../models/car/volkswagen_82.glb" }
   ],
   "objects": [
-    { "id": 1, "asset": "volkswagen_82", "position": [-0.001953125, 0.010156622, -0.03540039], "rotation": [0, 0, 0], "scale": [1, 1, 1], "up": [0.115791775, 0.9921227, 0.04779909], "snap": "ground", "offset": 0, "align": true, "ground": 0.010156622 },
-    { "id": 2, "asset": "volkswagen_82", "position": [-0.015308499, 0.009988069, -0.010192871], "rotation": [0, 0, 0], "scale": [1, 1, 1], "up": [0.033021275, 0.9973435, 0.06492805], "snap": "ground", "offset": 0, "align": true, "ground": 0.009988069 },
-    { "id": 3, "asset": "volkswagen_82", "position": [-0.036694884, 0.010008463, -0.007772088], "rotation": [0, 0, 0], "scale": [1, 1, 1], "up": [-0.008188555, 0.9954288, 0.095154144], "snap": "ground", "offset": 0, "align": true, "ground": 0.010008463 },
-    { "id": 4, "asset": "volkswagen_82", "position": [-0.052640438, 0.010021732, -0.011074364], "rotation": [0, 0, 0], "scale": [1, 1, 1], "up": [-0.024472961, 0.9972153, 0.07044655], "snap": "ground", "offset": 0, "align": true, "ground": 0.010021732 },
-    { "id": 5, "asset": "volkswagen_82", "position": [-0.07011223, 0.009689275, -0.012504756], "rotation": [0, 0, 0], "scale": [1, 1, 1], "up": [-0.017357113, 0.9998411, 0.0040517976], "snap": "ground", "offset": 0, "align": true, "ground": 0.009689275 },
-    { "id": 6, "asset": "volkswagen_82", "position": [-0.10687387, 0.011263536, -0.012001634], "rotation": [0, 0, 0], "scale": [1, 1, 1], "up": [0.099498495, 0.9899714, -0.1002823], "snap": "ground", "offset": 0, "align": true, "ground": 0.011263536 }
+    { "id": 1, "asset": "volkswagen_82", "position": [-0.001953125, 0.010156622, -0.03540039], "rotation": [0, 0, 0], "scale": [1, 1, 1], "up": [0.115791775, 0.9921227, 0.04779909], "snap": "ground", "offset": 0, "align": true, "ground": 0.010156622 }
   ]
 }
