@@ -13,6 +13,7 @@
   "ground": "krakow.ground.pgm",
   "surface": "krakow.surface.pgm",
   "class": "krakow.class.pgm",
+  "floor": "krakow.floor.pgm",
   "classes": {"0": "empty", "85": "ground", "170": "object", "255": "structure"},
   "params": {
     "minOpacity": 0.200000003, "minCount": 2,
