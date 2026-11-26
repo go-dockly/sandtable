@@ -30,6 +30,12 @@ dev/
 ```
 cd sandtable
 odin run . -collection:cmd=../commandos -- ../ospz/models/tree.ply
+
+# export
+odin run . -o:speed -collection:cmd=../commandos -- ./models/terrain/krakow.spz --world-scale 0.005 --model ./models/car/volkswagen_82.glb --align --terrain-export out/krakow
+
+# bench
+odin run . -o:speed -collection:cmd=../commandos -- levels/krakow.json --bench 30
 ```
 
 `-collection:cmd=../commandos` is needed for every build and for the `scene` and `mapgen` tests: the gameplay map's format, movement and sight are commandos' `gamemap` package, so the editor previews with the game's own code.
