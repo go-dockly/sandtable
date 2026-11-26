@@ -30,9 +30,10 @@ Iso :: struct {
 	target:      [3]f32,
 	azimuth:     f32, // degrees
 	elevation:   f32, // degrees
-	view_height: f32, // world units visible vertically; also Camera3D.fovy in ortho
-	min_height:  f32,
+	view_height: f32, // world units the window shows vertically: the zoom
+	min_height:  f32, // set every frame from the art density (artgrid.view_range)
 	max_height:  f32,
+	px_per_unit: f32, // art pixels per world unit, chosen when framing
 	distance:    f32, // camera to target; only sets where the near/far planes sit
 	dragging:    bool,
 	prev_mouse:  rl.Vector2,
@@ -47,6 +48,8 @@ iso_frame :: proc(c: ^Iso, center: [3]f32, extent: f32) {
 	c.view_height = e * 1.7
 	c.min_height = e * 0.15
 	c.max_height = e * 4
+	// so the framed view is 4 screen pixels per art pixel at 720 rows
+	c.px_per_unit = FRAMED_ROWS / c.view_height
 	c.distance = e * 6
 }
 
@@ -58,7 +61,7 @@ iso_camera :: proc(c: Iso) -> rl.Camera3D {
 		position = c.target + {horizontal * math.sin(az), c.distance * math.sin(el), horizontal * math.cos(az)},
 		target = c.target,
 		up = {0, 1, 0},
-		fovy = c.view_height,
+		fovy = c.view_height, // main replaces it with the art target's height
 		projection = .ORTHOGRAPHIC,
 	}
 }
@@ -66,7 +69,7 @@ iso_camera :: proc(c: Iso) -> rl.Camera3D {
 ISO_DEG_PER_PX    :: f32(0.3) // drag rotation, ~0.005 rad/px like update_orbit
 ISO_DEG_PER_WHEEL :: f32(6)   // horizontal two-finger swipe rotation
 
-// screen_h: height of the picture in screen pixels (art rows * pixel size)
+// screen_h: height of the window in screen pixels
 // left_drag: the left press has become a drag (editor.Click). Until then it
 // may be a click that places or selects, and the view must not jiggle.
 //

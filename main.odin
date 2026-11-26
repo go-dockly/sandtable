@@ -38,6 +38,7 @@ import rlgl "vendor:raylib/rlgl"
 
 import "editor"
 import "scene"
+import "artgrid"
 import "splatsort"
 
 BACKGROUND :: [4]u8{16, 14, 20, 255}
@@ -87,7 +88,7 @@ main :: proc() {
 		fmt.eprintln(
 			"usage: sandtable <cloud.spz|.ply> [--model file.glb] [--world-scale u] [--pos x,y,z] [--yaw deg] [--scale s] [--ground y]\n" +
 			"                 [--snap ground|surface|plane] [--offset y] [--align] [--max-tilt deg] [--cell m] [--terrain-export prefix]\n" +
-			"                 [--level file.json] [--bench seconds] [--bench-out stats.json]\n" +
+			"                 [--level file.json] [--bench seconds] [--bench-out stats.json] [--pixel-m metres]\n" +
 			"       sandtable <level.json> [--model file.glb]",
 		)
 		return
@@ -163,7 +164,9 @@ main :: proc() {
 
 	// pixlsplat's defaults: quant + outline + crisp on, 2x supersampling, no dither
 	cfg := Post_Settings{quant = true, crisp = true, outline = true, ss = 2, dither = 0}
-	pixel_size := i32(PIXEL_SIZE_DEFAULT)
+	upscale: Upscale
+	upscale_init(&upscale)
+	defer upscale_destroy(&upscale)
 	crisp_alpha := f32(0.35)
 	palette_mode := Palette_Mode.Extracted
 	game_cam := true
@@ -318,30 +321,47 @@ main :: proc() {
 		// The extracted palette is built from the ungraded cloud, so the grade only
 		// goes with the fixed Commandos palette.
 		cfg.grade = grade_strength if palette_mode == .Commandos else 0
-		if rl.IsKeyPressed(.EQUAL) || rl.IsKeyPressed(.KP_ADD) do pixel_size += 1
-		if rl.IsKeyPressed(.MINUS) || rl.IsKeyPressed(.KP_SUBTRACT) do pixel_size -= 1
 		if rl.IsKeyPressed(.LEFT_BRACKET) do crisp_alpha = clamp(crisp_alpha - 0.05, 0.05, 0.95)
 		if rl.IsKeyPressed(.RIGHT_BRACKET) do crisp_alpha = clamp(crisp_alpha + 0.05, 0.05, 0.95)
-
-		// ---- art grid follows the window -------------------------------------
-		pixel_size = clamp(pixel_size, PIXEL_SIZE_MIN, PIXEL_SIZE_MAX)
-		art_w, art_h := art_size(rl.GetScreenWidth(), rl.GetScreenHeight(), pixel_size)
-		targets_resize(&targets, art_w, art_h)
-		bench.art = {art_w, art_h}
 
 		// ---- camera ----------------------------------------------------------
 		// a left press only turns the camera once it is a drag, so a click
 		// can place or select (editor.Click)
 		left_drag := placement.click.dragged
+		win := [2]f32{f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
+		ws := placement.world_scale if placement.world_scale > 0 else 1
+		px := level_pixel(&lv, iso, ws)
+		density := 1 / (px.metres * ws) // art pixels per world unit
 		camera: rl.Camera3D
+		grid: artgrid.Grid
 		if game_cam {
+			// the zoom: an art pixel the level's band of screen pixels; alt
+			// goes past it, for finding a new one
+			band := [2]f32{px.scale_min, px.scale_max}
+			alt := rl.IsKeyDown(.LEFT_ALT) || rl.IsKeyDown(.RIGHT_ALT)
+			if alt do band = scene.PIXEL_SCALE_LIMITS
+			iso.min_height, iso.max_height = artgrid.view_range(win.y, density, band[0], band[1])
 			// the bench drives the camera itself: input would skew its phases
-			if !bench.ok do iso_update(&iso, f32(art_h * pixel_size), left_drag)
+			if !bench.ok do iso_update(&iso, win.y, left_drag)
+			if !alt do iso.view_height = clamp(iso.view_height, iso.min_height, iso.max_height)
 			camera = iso_camera(iso)
+			fwd := linalg.normalize(camera.target - camera.position)
+			right := linalg.normalize(linalg.cross(fwd, [3]f32{0, 1, 0}))
+			up := linalg.cross(right, fwd)
+			// rendered from the target on the art grid, over the whole target
+			grid = artgrid.game(win, density, iso.view_height, camera.target, right, up)
+			shift := grid.snapped - camera.target
+			camera.target += shift
+			camera.position += shift
+			camera.fovy = f32(grid.h) / density
+			if !bench.ok && !cmd do pixel_keys(&lv, iso, ws, grid.scale)
 		} else {
 			update_orbit(&free_cam, left_drag)
 			camera = free_cam
+			grid = artgrid.fixed({rl.GetScreenWidth(), rl.GetScreenHeight()}, PIXEL_SIZE_FREE, camera.target)
 		}
+		targets_resize(&targets, grid.w, grid.h)
+		bench.art = {grid.w, grid.h}
 		near, far := clip_planes(view.extent, game_cam, iso.distance)
 
 		// the scene pass's view & projection, also for the cursor's ray
@@ -357,20 +377,28 @@ main :: proc() {
 		} else {
 			proj_m = rl.MatrixPerspective(camera.fovy, aspect, near, far)
 		}
-		// the picture is drawn at (0, 0), art size * pixel size
-		pic_w, pic_h := f32(targets.w * pixel_size), f32(targets.h * pixel_size)
+		// where the picture is drawn: grid.origin, grid.size (it overhangs the window)
+		pic := rl.Rectangle{grid.origin.x, grid.origin.y, grid.size.x, grid.size.y}
 
 		// ---- objects: keyboard, then mouse, then onto the terrain --------------
 		placement_keys(&placement, camera, max(view.extent, 1e-4) if view.count > 0 else 1, rl.GetFrameTime(), ground_proxy.ok)
 		mouse := rl.GetMousePosition()
-		on_picture := mouse.x >= 0 && mouse.y >= 0 && mouse.x < min(pic_w, f32(rl.GetScreenWidth())) && mouse.y < min(pic_h, f32(rl.GetScreenHeight()))
-		ray, ray_ok := editor.screen_ray(linalg.inverse(proj_m * view_m), editor.ndc_from_screen(mouse, pic_w, pic_h))
+		on_picture := mouse.x >= max(0, pic.x) && mouse.y >= max(0, pic.y) && mouse.x < min(pic.x + pic.width, win.x) && mouse.y < min(pic.y + pic.height, win.y)
+		ray, ray_ok := editor.screen_ray(linalg.inverse(proj_m * view_m), editor.ndc_from_screen(mouse - {pic.x, pic.y}, pic.width, pic.height))
 		placement_mouse(&placement, ray, ray_ok && on_picture, mouse, ground_proxy.t, ground_proxy.ok)
 		placement_settle(&placement, ground_proxy.t, ground_proxy.ok)
 		if lv.baseline { // just opened: what "saved" looks like, once settled
 			delete(lv.saved)
 			lv.saved = strings.clone(level_text(&lv, &placement, cloud_path, ground_proxy.cell_m, nil))
 			lv.baseline = false
+		}
+		// --pixel-m: a change to the level's pixel section, once it is loaded,
+		// so the level shows unsaved until ctrl+S
+		if opts.pixel_m > 0 && !lv.baseline {
+			p := level_pixel(&lv, iso, placement.world_scale if placement.world_scale > 0 else 1)
+			p.metres = opts.pixel_m
+			lv.pixel = p
+			opts.pixel_m = 0
 		}
 		dirty := level_dirty(&lv, &placement, cloud_path, ground_proxy.cell_m)
 
@@ -440,10 +468,11 @@ main :: proc() {
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
-		src := rl.Rectangle{0, 0, f32(targets.w), -f32(targets.h)} // render textures are upside down
-		dst := rl.Rectangle{0, 0, pic_w, pic_h}
-		rl.DrawTexturePro(targets.art.texture, src, dst, {0, 0}, 0, rl.WHITE)
-		draw_placement_overlay(&placement, view_m, proj_m, dst.width, dst.height, ground_proxy.t, ground_proxy.ok)
+		upscale_draw(&upscale, targets.art.texture, targets.w, targets.h, pic)
+		// the overlay projects into the picture: shift it with the picture
+		rl.BeginMode2D(rl.Camera2D{offset = {pic.x, pic.y}, zoom = 1})
+		draw_placement_overlay(&placement, view_m, proj_m, pic.width, pic.height, ground_proxy.t, ground_proxy.ok)
+		rl.EndMode2D()
 
 		title := view.name if len(view.name) > 0 else path
 		rl.DrawText(fmt.ctprintf("%s", title), 10, 10, 20, rl.RAYWHITE)
@@ -452,10 +481,14 @@ main :: proc() {
 		} else {
 			rl.DrawText(
 				fmt.ctprintf(
-					"%d splats | %s camera | pixel %dpx (%dx%d art, ss %d) | %d fps",
+					"%d splats | %s camera | pixel %.2fx of %.1f..%.1f, %.1f cm%s (%dx%d art, ss %d) | %d fps",
 					view.count,
 					"game" if game_cam else "free",
-					pixel_size,
+					grid.scale,
+					px.scale_min,
+					px.scale_max,
+					px.metres * 100,
+					"" if lv.pixel != nil else " default",
 					targets.w,
 					targets.h,
 					cfg.ss,
@@ -478,7 +511,7 @@ main :: proc() {
 			10, 58, 16, {180, 180, 180, 255},
 		)
 		rl.DrawText(
-			"[C] camera  [-/+] pixel size  [S] ss  [R] reset | game: drag/arrows rotate, shift/right-drag pan, scroll zoom | free: drag orbit | drop a .spz or .ply",
+			"[C] camera  [S] ss  [R] reset | game: drag/arrows rotate, shift/right-drag pan, scroll zoom (alt: past the band), [-/=] art pixel size, [9]/[0] band ends here | free: drag orbit",
 			10, 78, 16, {160, 160, 160, 255},
 		)
 		px_per_unit := f32(targets.h) / camera.fovy if game_cam else 0

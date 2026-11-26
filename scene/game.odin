@@ -268,6 +268,7 @@ Export_Input :: struct {
 	terrain_path: string,          // the capture, relative to the mission file
 	map_path:     string,          // the gameplay map, relative to the mission file; "" none
 	map_frame:    Maybe(gamemap.Frame), // its frame: the mission is written in map metres
+	pixel:        Maybe(Pixel),         // the level's art size and zoom band, for the game's camera
 }
 
 // The keys the game reads, in the order they are written; the base's other
@@ -370,6 +371,9 @@ export_mission :: proc(in_: Export_Input, allocator := context.allocator) -> (te
 			if len(in_.map_path) > 0 {
 				key(&b, &first, "map"); strings.write_string(&b, quote(in_.map_path))
 			}
+			if px, ok := in_.pixel.?; ok {
+				key(&b, &first, "pixel"); strings.write_string(&b, pixel_json(px))
+			}
 		case "coordinateSpace":
 			key(&b, &first, k)
 			fmt.sbprintf(&b, `{{"width": %s, "height": %s, "origin": "top-left", "plane": "top-down"}}`,
@@ -404,6 +408,7 @@ export_mission :: proc(in_: Export_Input, allocator := context.allocator) -> (te
 	rest := make([dynamic]string)
 	outer: for k in base {
 		if k == "props" || k == "sandtable" || (k == "map" && len(in_.map_path) > 0) do continue
+		if k == "pixel" && in_.pixel != nil do continue
 		for m in known do if m == k do continue outer
 		append(&rest, k)
 	}

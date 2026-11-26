@@ -59,6 +59,7 @@ Use `-o:speed` for big captures: sorting millions of splats is slow in a debug b
 | `--max-tilt deg` | steepest tilt, default 20 |
 | `--cell m` | terrain cell in metres; default 0.5, coarser for sparse clouds |
 | `--terrain-export prefix` | write the heightmaps after each terrain build (see *Terrain*) |
+| `--pixel-m m` | metres per art pixel in the game camera: sets the level's `pixel` section (ctrl+S keeps it); without one, framing the capture gives 4 screen pixels per art pixel in a 720-row window |
 
 With a level, a capture given as well wins over the level's, and `--model` is what `A` places in an empty level. `F` prints the selected object as these flags (`shift+F`: every object).
 
@@ -120,9 +121,18 @@ Look:
 |-----|------|
 | `C` | game camera (isometric, orthographic) / free orbit camera |
 | `Q` `X` `E` `S` `D` | palette quantise, hard splats, outline, supersample 1x/2x, dither 0 / 0.5 / 1 |
-| `-` `+` | art pixel size |
+| scroll | game camera zoom: smooth, at a fixed art pixel size in metres, so zooming out gets finer on screen and zooming in chunkier, within the level's band (default 3 to 6 screen pixels per art pixel) |
+| `alt`+scroll | zoom past the band, to see where it stops looking right |
+| `-` `=` | art pixel a size coarser / finer (the level's `pixel.metres`) |
+| `9` `0` | the band's zoom-out / zoom-in end at the current zoom |
 | `P` | palette: extracted from the cloud / fixed Commandos colour script |
 | `G` | Commandos colour grade 1 / 0.5 / 0 (Commandos palette only) |
+
+The game camera's look is the level's `pixel` section: how many metres of the world one art pixel covers (the art's detail, the same at every zoom) and the band of zoom, in screen pixels per art pixel. Tune it by eye: `-` `=` for the detail, `alt`+scroll past the band, `9` and `0` to set its ends where it still looks right, then ctrl+S. The mission export copies it for the game's camera.
+
+```json
+  "pixel": { "metres": 0.1, "scaleMin": 3, "scaleMax": 6 },
+```
 | `[` `]` | hard mode: drop splats below this opacity |
 | `R` | reframe |
 
@@ -315,7 +325,8 @@ The parts that can be tested without a window are packages without raylib; the r
 |---------|-------|-------|
 | `terrain/` | the terrain proxy: heightmaps from the cloud, height / normal / footprint sampling, ray picking, heightmap export | `odin test terrain` |
 | `editor/` | objects with stable ids, the select / place / move state machine, undo / redo, cursor rays, picking, click-or-drag, terrain snapping | `odin test editor` |
-| `scene/` | the level file (read, write, repair, asset references, relative paths, the map section and its edits) and the Commandos export | `odin test scene -collection:cmd=../commandos` |
+| `scene/` | the level file (read, write, repair, asset references, relative paths, the map section and its edits, the pixel section) and the Commandos export | `odin test scene -collection:cmd=../commandos` |
+| `artgrid/` | the game camera's art grid: a fixed density, the zoom as a fractional scale, the camera snapped to the grid and the remainder shifted on screen, target sizes in buckets | `odin test artgrid` |
 | `splatsort/` | the splats' back-to-front order on every core, and culling to the game camera's view | `odin test splatsort` |
 | `mapgen/` | the automatic gameplay map from the terrain proxy: alignment, structures to buildings, trees and walls, props, ground; feature ids and retargeting edits | `odin test mapgen -collection:cmd=../commandos` |
 | `../commandos/gamemap/` | the gameplay map itself, shared with the game: format, layered A*, sight, edits | `cd ../commandos && odin test gamemap` |
@@ -334,14 +345,15 @@ The parts that can be tested without a window are packages without raylib; the r
 | `cameras.odin` | isometric game camera scaled to the cloud; free orbit | `commandos/camera/isometric.odin`, the ospz viewer |
 | `post.odin` | the pixel-art pass | `pixlsplat/src/post.odin`, verbatim |
 | `palette.odin` | k-means palette, plus a hand-picked Commandos colour script | `pixlsplat/src/palette.odin` |
-| `targets.odin` | render targets; the art grid rounds up and is drawn at an exact integer scale | `pixlsplat/src/view.odin` |
+| `targets.odin` | render targets, and the upscale shader that draws the art at a fractional scale with every art pixel the same size | `pixlsplat/src/view.odin` |
 
 ## Tests
 
 ```
 odin test terrain     # 10: a synthetic street with a slope, a building with no ground under it, a tree, a car, haze, sky blobs, at Krakow's scale too; export and load_export round trip
 odin test editor      # 16: rays through both cameras, picking, cursor on street and roof, modes, ids, undo / redo, settling
-odin test scene -collection:cmd=../commandos    # 15: level round trip, repairs, paths, the map section, the export's buildings, footprints and merge
+odin test artgrid     # 5: snapped render + shifted picture land every point where the true view does, the picture covers the window, the grid stays on the world, zoom resizes in buckets
+odin test scene -collection:cmd=../commandos    # 18: level round trip, repairs, paths, the map section, the pixel section, the export's buildings, footprints and merge
 odin test mapgen -collection:cmd=../commandos   # 9: a turned synthetic town at Krakow's scale: alignment, buildings, a courtyard, a tree, walls high and low, edits, ids, at 1 and 0.5 m
 (cd ../commandos && odin test gamemap)         # 14: movement, ledges, ladders and roofs, links and abilities, sight by stance, cones, edits, files, speed
 odin run tools/commandos_check -collection:cmd=../commandos -collection:st=.   # 27 checks in the game's own code

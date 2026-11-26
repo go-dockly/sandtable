@@ -37,6 +37,7 @@ Level_State :: struct {
 	id, title: string, // owned
 	game:      Maybe(scene.Game), // the Commandos export; its strings owned
 	map_section: Maybe(scene.Map_Section), // the gameplay map: cell, yaw, edits; owned
+	pixel:     Maybe(scene.Pixel), // the game camera's art size and zoom band; nil: from framing
 	confirm:   enum { None, Overwrite, Discard }, // waiting for the second press (CONFIRM_S)
 	confirm_at: time.Time,
 	baseline:  bool, // just loaded: take `saved` after the objects have settled
@@ -147,6 +148,7 @@ level_text :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, cell_m: 
 		view         = view,
 		game         = lv.game,
 		map_section  = lv.map_section,
+		pixel        = lv.pixel,
 	}
 	l := scene.build(&p.ed, paths, h)
 	return scene.encode(l)
@@ -320,6 +322,7 @@ open_level :: proc(
 	lv.title = strings.clone(l.title if len(l.title) > 0 else lv.id)
 	level_set_game(lv, l.game)
 	level_set_map(lv, l.map_section)
+	lv.pixel = l.pixel
 	lv.baseline = true
 	n := len(p.ed.instances)
 	level_say(lv, missing > 0, "opened %s: %d object%s%s", path, n, "" if n == 1 else "s",
@@ -336,6 +339,7 @@ level_new :: proc(lv: ^Level_State, cloud_path: string) {
 	lv.saved, lv.id, lv.title = {}, {}, {}
 	level_set_game(lv, nil)
 	level_set_map(lv, nil)
+	lv.pixel = nil
 	level_set_path(lv, scene.default_level_path(cloud_path, context.temp_allocator))
 }
 
@@ -461,6 +465,7 @@ level_export :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, wt: Wo
 		terrain_path = scene.relative(mission_path, cloud_path, context.temp_allocator),
 		map_path     = map_rel,
 		map_frame    = wm.m.frame if map_rel != "" else nil,
+		pixel        = lv.pixel,
 	}, context.temp_allocator)
 	if err := write_level(mission_path, text); err != nil {
 		level_say(lv, true, "export %s failed: %v", mission_path, err)

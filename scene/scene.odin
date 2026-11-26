@@ -22,6 +22,8 @@ package scene
 //     "game": { "mission": "krakow.mission.json", "base": "krakow.mission.base.json",
 //               "origin": [x, z], "size": [w, h], "buildingsFromTerrain": true },
 //                                     the Commandos export, see game.odin
+//     "pixel": { "metres": 0.1, "scaleMin": 3, "scaleMax": 6 },
+//                                     the game camera's art, see pixel.odin
 //     "assets": [
 //       { "id": "volkswagen_82", "path": "../models/car/volkswagen_82.glb" }
 //     ],
@@ -84,6 +86,7 @@ Level :: struct {
 	view:         Maybe(View),
 	game:         Maybe(Game), // the Commandos export (game.odin); nil until the first one
 	map_section:  Maybe(Map_Section) `json:"map"`, // the gameplay map (map.odin); nil until the first one
+	pixel:        Maybe(Pixel),       // the game camera's art (pixel.odin); nil: the editor's default
 	assets:       []Asset_Ref,
 	objects:      []Object,
 }
@@ -162,6 +165,7 @@ encode :: proc(l: Level, allocator := context.allocator) -> string {
 			quote(g.mission), quote(g.base), num(g.origin.x), num(g.origin.y), num(g.size.x), num(g.size.y), game_buildings(g))
 	}
 	if ms, ok := l.map_section.?; ok do encode_map_section(&b, ms)
+	if px, ok := l.pixel.?; ok do encode_pixel(&b, px)
 
 	w(&b, "  \"assets\": [")
 	for a, i in l.assets {
@@ -282,6 +286,7 @@ decode :: proc(data: []byte, allocator := context.allocator) -> (l: Level, warni
 		}
 	}
 	if ms, ok := &l.map_section.?; ok do check_map_section(ms, &warn, allocator)
+	check_pixel(&l, &warn)
 	return l, warn[:], .None
 }
 
@@ -331,6 +336,7 @@ Header :: struct {
 	view:         Maybe(View),
 	game:         Maybe(Game),
 	map_section:  Maybe(Map_Section),
+	pixel:        Maybe(Pixel),
 }
 
 // A level from the editor's instances. asset_paths[i] is asset i's path,
@@ -349,6 +355,7 @@ build :: proc(ed: ^editor.Editor, asset_paths: []string, h: Header, allocator :=
 		max_tilt     = h.max_tilt * math.DEG_PER_RAD,
 		next_id      = max(ed.next_id, 1),
 		view         = h.view,
+		pixel        = h.pixel,
 	}
 	if g, ok := h.game.?; ok {
 		g.mission = strings.clone(g.mission)

@@ -63,6 +63,10 @@ jobs:
         working-directory: sandtable
         run: odin test splatsort
 
+      - name: artgrid
+        working-directory: sandtable
+        run: odin test artgrid
+
       - name: mapgen
         working-directory: sandtable
         run: odin test mapgen -collection:cmd=../commandos
