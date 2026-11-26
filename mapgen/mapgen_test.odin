@@ -35,8 +35,10 @@ L_HOLE :: [4]f32{48, 16, 62, 30}  // its courtyard, open to the sky
 L_H    :: f32(7)
 TREE_C :: [2]f32{20, 55}
 TREE_R :: f32(4)
-WALL   :: [4]f32{40, 50, 41, 70}  // a 2 m garden wall, 1 m thick
-WALL_H :: f32(2)
+WALL   :: [4]f32{40, 50, 41, 70}  // a 2.5 m garden wall, 1 m thick
+WALL_H :: f32(2.5) // clear of the terrain's 2 m structure threshold
+LOW    :: [4]f32{5, 70, 30, 71}   // a 1.2 m garden wall along the south edge
+LOW_H  :: f32(1.2)
 
 @(private = "file")
 town :: proc() -> (pos: [dynamic][3]f32, op: [dynamic]f32) {
@@ -51,7 +53,7 @@ town :: proc() -> (pos: [dynamic][3]f32, op: [dynamic]f32) {
 
 	for _ in 0 ..< 16 * int(SIZE * SIZE) {
 		x, z := u(r, 0, SIZE), u(r, 0, SIZE)
-		if in_box(x, z, B1) || in_l(x, z) || in_box(x, z, WALL) do continue
+		if in_box(x, z, B1) || in_l(x, z) || in_box(x, z, WALL) || in_box(x, z, LOW) do continue
 		if math.hypot(x - TREE_C.x, z - TREE_C.y) < TREE_R && rand.float32(r) < 0.6 do continue // the canopy hides most
 		add(&pos, &op, {x, u(r, -0.03, 0.03), z}, 0.9)
 	}
@@ -66,6 +68,7 @@ town :: proc() -> (pos: [dynamic][3]f32, op: [dynamic]f32) {
 	roof(&pos, &op, r, B1, B1_H, nil)
 	roof(&pos, &op, r, L_OUT, L_H, L_HOLE)
 	roof(&pos, &op, r, WALL, WALL_H, nil)
+	roof(&pos, &op, r, LOW, LOW_H, nil)
 	// the canopy: 3..8 m, rough
 	canopy_splats := f32(math.PI * TREE_R * TREE_R * 30)
 	for _ in 0 ..< int(canopy_splats) {
@@ -195,6 +198,11 @@ features_from_the_capture :: proc(t: ^testing.T) {
 	testing.expectf(t, wall != nil && dw < 3, "the garden wall, %.1f m off", dw)
 	if wall != nil do testing.expectf(t, abs(wall.height - WALL_H) < 0.4, "wall %.1f m", wall.height)
 
+	// the low garden wall: under the terrain's structure height, still a wall
+	lw, dl := find(m, .Wall, to_map(m, 17.5, 70.5))
+	testing.expectf(t, lw != nil && dl < 3 && tw.stats.low == 1, "the low wall, %.1f m off, %d low", dl, tw.stats.low)
+	if lw != nil do testing.expectf(t, abs(lw.height - LOW_H) < 0.3, "low wall %.1f m", lw.height)
+
 	// the ground is walkable, flat, and the street is open
 	n, ok := gamemap.node_at(m, {to_map(m, 5, 5).x, to_map(m, 5, 5).y, 0})
 	testing.expect(t, ok, "street")
@@ -241,7 +249,7 @@ edits_on_the_automatic_map :: proc(t: ^testing.T) {
 	street_eye := gamemap.eye_point({to_map(m, 30, 60).x, to_map(m, 30, 60).y, 0}, .Standing)
 	testing.expect(t, !gamemap.can_see_body(m, street_eye, {behind.x, behind.y, 0}, .Crouching), "hidden behind the wall")
 	close := to_map(m, 42, 60)
-	testing.expect(t, !gamemap.can_see_body(m, street_eye, {close.x, close.y, 0}, .Standing), "a 2 m wall hides someone standing right behind it")
+	testing.expect(t, !gamemap.can_see_body(m, street_eye, {close.x, close.y, 0}, .Standing), "a 2.5 m wall hides someone standing right behind it")
 	testing.expect(t, gamemap.can_see_body(m, roof_eye, {behind.x, behind.y, 0}, .Crouching), "the roof sees over the wall")
 }
 

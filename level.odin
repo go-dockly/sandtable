@@ -27,6 +27,7 @@ import "core:time"
 
 import rl "vendor:raylib"
 
+import "mapgen"
 import "scene"
 
 Level_State :: struct {
@@ -374,6 +375,14 @@ level_cursor_game :: proc(lv: ^Level_State, p: ^Placement, wt: World_Terrain) ->
 	if !p.cursor_ok do return nil
 	g, ok := level_game(lv, p, wt)
 	if !ok do return nil
+	// with a map (its yaw kept in the level), map metres: what the mission
+	// is written in
+	if sec, has := lv.map_section.?; has {
+		if yaw, has_yaw := sec.yaw.?; has_yaw {
+			f := mapgen.frame_for(g.origin, g.size, yaw, p.world_scale, wt.t.lo if wt.ok else 0)
+			return scene.export_to_game(g, p.world_scale, f, p.cursor.xz)
+		}
+	}
 	return scene.to_game(g, p.world_scale, p.cursor.xz)
 }
 
@@ -451,6 +460,7 @@ level_export :: proc(lv: ^Level_State, p: ^Placement, cloud_path: string, wt: Wo
 		source_level = scene.relative(mission_path, lv.path, context.temp_allocator),
 		terrain_path = scene.relative(mission_path, cloud_path, context.temp_allocator),
 		map_path     = map_rel,
+		map_frame    = wm.m.frame if map_rel != "" else nil,
 	}, context.temp_allocator)
 	if err := write_level(mission_path, text); err != nil {
 		level_say(lv, true, "export %s failed: %v", mission_path, err)

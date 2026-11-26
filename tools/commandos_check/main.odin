@@ -15,8 +15,12 @@ import "core:fmt"
 import "core:math"
 import "core:os"
 
+import "st:mapgen"
 import "st:scene"
 import "st:terrain"
+import "cmd:actors"
+import "cmd:game"
+import "cmd:gamemap"
 import "cmd:geom"
 import "cmd:mission"
 import "cmd:nav"
@@ -39,6 +43,7 @@ main :: proc() {
 		for x := f32(0); x <= 60; x += 0.25 {
 			y := f32(0)
 			if x >= 30 && x <= 50 && z >= 30 && z <= 50 do y = 10
+			if x >= 20 && x <= 21 && z >= 42 && z <= 58 do y = 1.2 // a low wall: not a building, cover
 			append(&pos, [3]f32{CORNER.x + x, y, CORNER.y + z} * S)
 			append(&op, 1)
 		}
@@ -106,6 +111,113 @@ main :: proc() {
 	check(length > (exit.x - spawn.x) + 1, "it detours: %.1f m against %.1f m straight", length, exit.x - spawn.x)
 	_ = geom.Point{}
 
+	gameplay_map(ter, g, at)
+
 	fmt.printfln("\n%d failed", fails)
 	if fails > 0 do os.exit(1)
+}
+
+// The gameplay map (docs/map_spec.md) through the game: sandtable builds the
+// map from the same capture, applies a walkable roof and a ladder, writes the
+// map and a mission in map metres; commandos loads both and plays the slice:
+// a guard sees over the low wall but not someone crouching behind it, and
+// the player climbs the ladder onto the roof.
+gameplay_map :: proc(ter: terrain.Terrain, g: scene.Game, at: [2]f32) {
+	fmt.println("\n-- gameplay map")
+	ter := ter
+	params := mapgen.default_params()
+	m, stats := mapgen.build({terrain = &ter, world_scale = S, origin = g.origin, size = g.size, params = params})
+	defer gamemap.destroy(&m)
+	fmt.printfln("mapgen: %v", stats)
+	check(abs(stats.yaw) < 1, "an axis-aligned town gives yaw 0: %.1f", stats.yaw)
+	check(stats.buildings == 1, "the building")
+	check(stats.low == 1, "the low wall, from object cells")
+
+	// local town metres -> map metres
+	mp :: proc(m: ^gamemap.Map, local: [2]f32) -> [2]f32 {
+		w := (CORNER + local) * S
+		return gamemap.world_to_map(m.frame, {w.x, 0, w.y}).xy
+	}
+	// the ladder against the building's west wall as the map has it (its
+	// footprint, not the capture's exact edge): foot a cell outside, top a
+	// cell inside
+	building := ""
+	west := max(f32)
+	for f in m.features {
+		if f.kind != .Building do continue
+		building = f.id
+		for ring in f.footprint do for q in ring do west = min(west, q.x)
+	}
+	mid := mp(&m, {29.5, 40.5}).y
+	foot, top := [2]f32{west - m.cell * 0.5, mid}, [2]f32{west + m.cell * 0.5, mid}
+	problems := gamemap.apply_edits(&m, []gamemap.Edit{
+		{id = "e1", kind = .Building, target = building, walkable_roof = true},
+		{id = "e2", kind = .Link, link = .Ladder, a = {foot.x, foot.y, 0}, b = {top.x, top.y, 10}},
+	}, context.temp_allocator)
+	for p in problems do check(false, "edit %s: %s", p.edit, p.message)
+
+	map_path := "commandos_check.map.json"
+	check(gamemap.save(m, map_path) == .None, "written %s", map_path)
+	defer os.remove(map_path)
+	defer os.remove(gamemap.bin_path(map_path, context.temp_allocator))
+
+	spawn := [2]f32{west - 5, mid}
+	post := mp(&m, {6.5, 50.5})
+	base_text := fmt.tprintf(`{{"id": "slice", "playerSpawn": {{"x": %v, "y": %v}},
+	  "guards": [{{"id": "g", "speed": 0, "patrol": [{{"x": %v, "y": %v}}]}}]}}`, spawn.x, spawn.y, post.x, post.y)
+	base, _ := scene.parse_mission(transmute([]byte)base_text)
+	text, _ := scene.export_mission(scene.Export_Input{
+		game = g, world_scale = S, ground = ter.lo, ter = ter, base = base,
+		id = "slice", source_level = "town.json", terrain_path = "town.spz",
+		map_path = map_path, map_frame = m.frame,
+	})
+	path := "commandos_check.slice.mission.json"
+	defer os.remove(path)
+	check(os.write_entire_file(path, transmute([]byte)text) == nil, "written %s", path)
+
+	lvl, ok := mission.load(path)
+	check(ok && lvl.has_map, "commandos mission.load with its map")
+	if !ok || !lvl.has_map do return
+	b := mission.bounds(&lvl)
+	check(b.width == f32(m.w) * m.cell, "bounds from the map: %v", b)
+
+	DT :: f32(1.0 / 60)
+	run :: proc(w: ^game.World, input: game.Input, seconds: f32) {
+		for _ in 0 ..< int(seconds / DT) do game.update(w, input, DT)
+	}
+
+	// the guard looks east at the low wall; the player stands, then crouches, behind it
+	look :: proc(lvl: mission.Mission, player: [2]f32, crouch: bool) -> bool {
+		l := lvl
+		l.player_spawn = {player.x, player.y}
+		w := game.world_init(l)
+		defer actorless_destroy(&w)
+		w.guards[0].facing = {1, 0}
+		run(&w, {sneak = crouch}, 0.1)
+		return w.guards[0].player_visible
+	}
+	behind := mp(&m, {22.5, 50.5})
+	check(look(lvl, behind, false), "the guard sees a man standing behind the 1.2 m wall")
+	check(!look(lvl, behind, true), "not one crouching behind it")
+
+	w := game.world_init(lvl)
+	defer game.world_destroy(&w)
+	run(&w, {move = {1, 0}}, 1)
+	update_interact(&w)
+	check(w.player.climb.active, "at the wall, E takes the ladder")
+	run(&w, {}, 5)
+	check(abs(w.player.h - 10) < 0.2, "the player is on the roof: %.2f m", w.player.h)
+	before := w.player.position
+	run(&w, {move = {1, 0}}, 1)
+	check(w.player.position.x > before.x + 3 && abs(w.player.h - 10) < 0.2, "and walks across it")
+}
+
+// A world sharing the mission's geometry and map: free its guards only.
+actorless_destroy :: proc(w: ^game.World) {
+	actors.guards_destroy(w.guards)
+	w.guards = nil
+}
+
+update_interact :: proc(w: ^game.World) {
+	game.update(w, {interact = true}, 1.0 / 60)
 }

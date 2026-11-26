@@ -86,6 +86,7 @@ Placement :: struct {
 //                 [--world-scale u] [--pos x,y,z] [--yaw degrees] [--scale s] [--ground y]
 //                 [--snap ground|surface|plane] [--offset y] [--align] [--max-tilt degrees]
 //                 [--cell metres] [--terrain-export prefix] [--level file.json]
+//                 [--bench seconds] [--bench-out stats.json]
 //   odin run . -- levels/krakow.json    (a level: its capture, models and objects)
 //
 // --world-scale is world units per metre (default 1). --pos sets the ground
@@ -109,6 +110,8 @@ Options :: struct {
 	export:      string,
 	level:       string, // level file: opened if it exists, saved to (ctrl+S)
 	level_arg:   bool,   // the level was the positional argument: it must exist
+	bench:       f32,    // seconds of the speed test (bench.odin); 0 none
+	bench_out:   string, // where its stats go
 }
 
 DEFAULT_MAX_TILT :: f32(20) // degrees; steeper than any street, flatter than a kerb edge
@@ -118,6 +121,7 @@ parse_options :: proc(args: []string) -> (o: Options, ok: bool) {
 	o.scale = 1
 	o.world_scale = 1
 	o.max_tilt = DEFAULT_MAX_TILT
+	o.bench_out = "bench.json"
 	ok = true
 	i := 0
 	for i < len(args) {
@@ -223,6 +227,16 @@ parse_options :: proc(args: []string) -> (o: Options, ok: bool) {
 			}
 		case "--terrain-export":
 			o.export = value
+		case "--bench":
+			v, vok := strconv.parse_f32(value)
+			if !vok || v <= 0 {
+				fmt.eprintf("--bench %q: expected seconds\n", value)
+				ok = false
+			} else {
+				o.bench = v
+			}
+		case "--bench-out":
+			o.bench_out = value
 		case "--level":
 			o.level = value
 		case "--pos":

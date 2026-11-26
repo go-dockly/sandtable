@@ -13,8 +13,9 @@ package mapgen
 //   4. classify  each structure: a wall is thin, a tree shows ground under
 //                it or is rough on top, the rest are buildings
 //   5. features  buildings as squared footprints with one clean flat roof
-//                height, trees as a trunk and a canopy, walls, and the placed
-//                objects as props
+//                height, trees as a trunk and a canopy, walls; low solids
+//                (0.5..2 m: low walls, hedges, parked cars) as walls or
+//                volumes; and the placed objects as props
 //   6. ground    the bare ground is layer 0; slopes over `max_slope` are not
 //                walkable
 //
@@ -46,6 +47,7 @@ Params :: struct {
 	tree_ground: f32,        // share of such cells that makes a structure a tree
 	tree_rough:  f32,        // metres: a mean step between neighbouring cells' tops this big makes it a tree
 	wall_width:  f32,        // metres: a structure this thin is a wall
+	low_height:  f32,        // metres: a low solid (an object cell) this tall is cover
 }
 
 default_params :: proc() -> Params {
@@ -58,6 +60,7 @@ default_params :: proc() -> Params {
 		tree_ground = 0.35,
 		tree_rough  = 0.6,
 		wall_width  = 2.5,
+		low_height  = 0.5,
 	}
 }
 
@@ -84,6 +87,7 @@ Stats :: struct {
 	buildings: int,
 	trees:     int,
 	walls:     int,
+	low:       int, // low walls, hedges, cars from the capture
 	props:     int,
 	walkable:  int, // ground cells
 	steep:     int, // ground cells too steep to walk
@@ -116,13 +120,16 @@ build :: proc(in_: Input) -> (m: gamemap.Map, stats: Stats) {
 	top := make([]f32, n, context.temp_allocator)
 	seen := make([]bool, n, context.temp_allocator) // shows ground under a structure
 	solid := make([]bool, n, context.temp_allocator)
+	low := make([]bool, n, context.temp_allocator)  // a low solid: wall, hedge, car
+	low_top := make([]f32, n, context.temp_allocator)
 
 	t_cell_m := t.cell / ws
 	k := clamp(int(math.round(p.cell / t_cell_m)), 1, 4) // subsamples per side
 	for y in 0 ..< h {
 		for x in 0 ..< w {
 			c := y * w + x
-			got, structure, saw := 0, 0, 0
+			got, structure, saw, object := 0, 0, 0, 0
+			so := f32(0)
 			sg, st, ss := f32(0), f32(0), f32(0)
 			for sy in 0 ..< k {
 				for sx in 0 ..< k {
@@ -135,6 +142,10 @@ build :: proc(in_: Input) -> (m: gamemap.Map, stats: Stats) {
 					s := (t.surface[tc] - frame.ground) / ws
 					sg += g
 					st += s
+					if t.class[tc] == .Object && s - g >= p.low_height {
+						object += 1
+						so += s
+					}
 					if t.class[tc] == .Structure {
 						structure += 1
 						ss += s
@@ -150,6 +161,10 @@ build :: proc(in_: Input) -> (m: gamemap.Map, stats: Stats) {
 			top[c] = ss / f32(structure) if structure > 0 else st / f32(got)
 			solid[c] = 2 * structure >= got
 			seen[c] = 2 * saw >= max(structure, 1)
+			if !solid[c] && 2 * object >= got {
+				low[c] = true
+				low_top[c] = so / f32(object)
+			}
 		}
 	}
 
@@ -216,7 +231,7 @@ build :: proc(in_: Input) -> (m: gamemap.Map, stats: Stats) {
 		}
 		if pairs > 0 do rough /= f32(pairs)
 
-		thin := f32(min(x1 - x0 + 1, y1 - y0 + 1)) * p.cell <= p.wall_width
+		thin := thickness(len(cells), x1 - x0 + 1, y1 - y0 + 1, p.cell) <= p.wall_width
 		f := gamemap.Feature{base = base}
 		switch {
 		case thin:
@@ -245,6 +260,44 @@ build :: proc(in_: Input) -> (m: gamemap.Map, stats: Stats) {
 		if len(f.footprint) == 0 do continue
 		f.id = feature_id(f.kind, centre, &taken, m.allocator)
 		append(&m.features, f)
+	}
+
+	// ---- low solids: under structure_height, over low_height ----------------------
+	// Walls, hedges, parked cars from the capture: cover, seen over standing,
+	// hidden behind crouching. A wall when thin, else a volume.
+	close_gaps(low, w, h)
+	low_labels, low_count := label(low, w, h)
+	low_cells := make([][dynamic]int, low_count, context.temp_allocator)
+	for c in 0 ..< n {
+		if l := low_labels[c]; l > 0 {
+			if low_cells[l - 1] == nil do low_cells[l - 1] = make([dynamic]int, context.temp_allocator)
+			append(&low_cells[l - 1], c)
+		}
+	}
+	for cells, li in low_cells {
+		if len(cells) < min_cells do continue
+		gs := make([]f32, len(cells), context.temp_allocator)
+		ts := make([]f32, len(cells), context.temp_allocator)
+		x0, y0, x1, y1 := w, h, -1, -1
+		centre: [2]f32
+		for c, i in cells {
+			// a gap closed in between has no top of its own: its neighbours'
+			gs[i], ts[i] = ground[c], low_top[c] if low_top[c] > 0 else ground[c]
+			x, y := c % w, c / w
+			x0, y0, x1, y1 = min(x0, x), min(y0, y), max(x1, x), max(y1, y)
+			centre += gamemap.cell_centre(&m, x, y)
+		}
+		centre /= f32(len(cells))
+		base := median(gs)
+		f := gamemap.Feature{base = base, height = round_to(median(ts) - base, 0.1)}
+		if f.height < p.low_height do continue
+		thin := thickness(len(cells), x1 - x0 + 1, y1 - y0 + 1, p.cell) <= p.wall_width
+		f.kind = .Wall if thin else .Volume
+		f.footprint = trace(low_labels, w, h, i32(li + 1), p.cell, m.allocator)
+		if len(f.footprint) == 0 do continue
+		f.id = feature_id(f.kind, centre, &taken, m.allocator)
+		append(&m.features, f)
+		stats.low += 1
 	}
 
 	// ---- props ---------------------------------------------------------------------
@@ -314,7 +367,8 @@ frame_for :: proc(origin, size: [2]f32, yaw, world_scale, ground: f32) -> gamema
 // angle the boundary cells are projected on both turned axes and binned a
 // cell wide; buildings' walls pile up in few bins when the angle is right,
 // so the angle with the most piled-up bins (sum of squared counts) wins.
-// Searched in 1 degree steps, then 0.1 around the best with half-cell bins. 0 when there are no
+// Searched in 1 degree steps, then 0.1 around the best with half-cell bins;
+// where several angles tie, the middle of them. 0 when there are no
 // structures.
 edge_direction :: proc(t: terrain.Terrain) -> f32 {
 	w, h := t.w, t.h
@@ -338,27 +392,29 @@ edge_direction :: proc(t: terrain.Terrain) -> f32 {
 			clear(bins)
 			for p in pts {
 				u := c * p.x + s * p.y if axis == 0 else -s * p.x + c * p.y
-				bins[i32(math.floor(u / bin))] += 1
+				bins[i32(math.round(u / bin))] += 1 // points sit on whole cells: bins centred on them
 			}
 			for _, n in bins do total += f64(n) * f64(n)
 		}
 		return total
 	}
-	best, best_s := f32(0), -1.0
-	for i in 0 ..< 90 {
-		deg := f32(i) - 44
-		if v := score(pts[:], deg, &bins); v > best_s {
-			best, best_s = deg, v
+	// the middle of the run of angles that score best: with few edges a
+	// whole range of angles bins them equally well
+	plateau :: proc(pts: [][2]f32, bins: ^map[i32]i32, start, step: f32, count: int, bin: f32) -> f32 {
+		scores := make([]f64, count, context.temp_allocator)
+		top := -1.0
+		for i in 0 ..< count {
+			scores[i] = score(pts, start + f32(i) * step, bins, bin)
+			top = max(top, scores[i])
 		}
+		first := 0
+		for scores[first] < top do first += 1
+		last := first
+		for last + 1 < count && scores[last + 1] >= top do last += 1
+		return start + f32(first + last) * 0.5 * step
 	}
-	coarse := best
-	best_s = -1
-	for i in -15 ..= 15 {
-		deg := coarse + f32(i) * 0.1
-		if v := score(pts[:], deg, &bins, 0.5); v > best_s {
-			best, best_s = deg, v
-		}
-	}
+	coarse := plateau(pts[:], &bins, -44, 1, 90, 1)
+	best := plateau(pts[:], &bins, coarse - 1.5, 0.1, 31, 0.5)
 	if best <= -45 do best += 90
 	if best > 45 do best -= 90
 	return round_to(best, 0.1)
@@ -662,6 +718,12 @@ retarget :: proc(m: ^gamemap.Map, edits: []gamemap.Edit) -> (out: []gamemap.Edit
 }
 
 // ---------------------------------------------------------------------------
+
+// How thick a thing is, metres: its area over its length (the long side of
+// its box), so a wall a little off the grid's angle still reads as thin.
+thickness :: proc(cells, bw, bh: int, cell: f32) -> f32 {
+	return f32(cells) * cell / f32(max(bw, bh, 1))
+}
 
 @(private)
 median :: proc(v: []f32) -> f32 {

@@ -80,7 +80,7 @@ main :: proc() {
 		fmt.eprintln(
 			"usage: sandtable <cloud.spz|.ply> [--model file.glb] [--world-scale u] [--pos x,y,z] [--yaw deg] [--scale s] [--ground y]\n" +
 			"                 [--snap ground|surface|plane] [--offset y] [--align] [--max-tilt deg] [--cell m] [--terrain-export prefix]\n" +
-			"                 [--level file.json]\n" +
+			"                 [--level file.json] [--bench seconds] [--bench-out stats.json]\n" +
 			"       sandtable <level.json> [--model file.glb]",
 		)
 		return
@@ -188,7 +188,20 @@ main :: proc() {
 	last_fwd: [3]f32
 	last_pos: [3]f32
 
+	// the speed test: uncapped, on the gameplay map
+	bench := Bench{seconds = opts.bench, out = opts.bench_out}
+	defer bench_destroy(&bench)
+	bench_art: [2]i32
+	if bench.seconds > 0 {
+		rl.ClearWindowState({.VSYNC_HINT})
+		rl.SetTargetFPS(0)
+		world_map_build(&game_map, &lv, &placement, ground_proxy, model_shader.shader)
+		bench_start(&bench, &game_map)
+		fmt.printfln("bench: %.0f s after %.0f s of warm-up%s", bench.seconds, BENCH_WARMUP, "" if bench.ok else fmt.tprintf(": cannot start, %s", bench.note))
+	}
+
 	for !rl.WindowShouldClose() {
+		if bench.seconds > 0 && bench_frame(&bench, &game_map, &iso, rl.GetFrameTime()) do break
 		// ---- input ---------------------------------------------------------
 		if rl.IsFileDropped() {
 			files := rl.LoadDroppedFiles()
@@ -303,6 +316,7 @@ main :: proc() {
 		pixel_size = clamp(pixel_size, PIXEL_SIZE_MIN, PIXEL_SIZE_MAX)
 		art_w, art_h := art_size(rl.GetScreenWidth(), rl.GetScreenHeight(), pixel_size)
 		targets_resize(&targets, art_w, art_h)
+		bench_art = {art_w, art_h}
 
 		// ---- camera ----------------------------------------------------------
 		// a left press only turns the camera once it is a drag, so a click
@@ -366,7 +380,7 @@ main :: proc() {
 
 		rl.BeginTextureMode(rt)
 		rl.ClearBackground(rl.BLANK)
-		if show_splats || show_model || show_box || show_map {
+		if show_splats || show_model || show_box || show_map || bench.ok {
 			rl.BeginMode3D(camera)
 			// BeginMode3D builds its projection from raylib's default cull
 			// distances; the splat shader uses proj_m. Meshes must use the same
@@ -376,6 +390,7 @@ main :: proc() {
 			if show_model do placement_draw(&placement)
 			if show_box do greybox_draw(ground_proxy.box)
 			if show_map do world_map_draw(&game_map)
+			if bench.ok do bench_draw(&bench, &game_map)
 			if show_splats {
 				splat_set_frame(&splat, view_m, proj_m, rw, rh, game_cam, cfg.crisp, crisp_alpha)
 				splat_draw(&splat, view, cfg.crisp)
@@ -438,6 +453,8 @@ main :: proc() {
 		rl.EndDrawing()
 		free_all(context.temp_allocator)
 	}
+
+	if bench.seconds > 0 do bench_report(&bench, &game_map, int(view.count), bench_art, int(cfg.ss))
 
 	// closing with unsaved changes: keep them next to the level
 	level_autosave(&lv, &placement, cloud_path, ground_proxy.cell_m, iso)

@@ -186,8 +186,8 @@ The slice:
 - [x] sandtable builds ground, square buildings with flat roofs and trees from the Krakow terrain, with the aligned frame (tested on a synthetic town at Krakow's scale; not yet on the Krakow capture)
 - [x] Edits: flatten, building height and walkable roof, a ladder link (written in the level by hand; grid tools to come)
 - [ ] `Tab` shows the layers; one guard's vision cone is drawn with `gamemap.visible` (built and compiling, not yet seen running)
-- [ ] commandos loads the Krakow map: a guard patrols the street, sees over a low wall, and the player climbs a ladder onto a roof
-- [ ] Speed test: the splat backdrop plus 10 characters at 60 fps on the hardware you target
+- [x] commandos loads the Krakow map: a guard patrols the street, sees over a low wall, and the player climbs a ladder onto a roof (headless, in commandos' tests and through sandtable's export in `tools/commandos_check`, on synthetic captures; not yet on the Krakow capture, nor seen in a window)
+- [ ] Speed test: the splat backdrop plus 10 characters at 60 fps on the hardware you target (`--bench 30` in sandtable is ready: run it there)
 
 The current 2D export stays until the last two boxes are ticked.
 
