@@ -25,9 +25,10 @@ import "../scene"
 
 LEVELS_ROOT    :: "levels"
 LEVELS_RESCAN  :: 2.0 // seconds between looks at levels/ while the list is open
-UI_LEFT_W      :: 380
-UI_RIGHT_W     :: 330
-UI_KEY_W       :: 118 // the label column of key / value rows
+UI_LEFT_W      :: 400
+UI_RIGHT_W     :: 340
+UI_KEY_W       :: 104 // the label column of key / value rows
+UI_MARGIN      :: 10
 
 // What the panels keep between frames, and what they ask main to do.
 Panels :: struct {
@@ -82,21 +83,37 @@ panels :: proc(ui: ^Ui, ps: ^Panels, e: Ui_Env) {
 	ps.rebuild = false
 	if !ui.visible do return
 	ctx := ui.ctx
-	opts := mu.Options{.NO_CLOSE, .AUTO_SIZE, .NO_RESIZE, .NO_SCROLL}
+	opts := mu.Options{.NO_CLOSE, .NO_RESIZE}
 
-	if mu.begin_window(ctx, "sandtable", {10, 10, UI_LEFT_W, 400}, opts) {
+	fit_window(ctx, "sandtable", UI_LEFT_W, e.win.y)
+	if mu.begin_window(ctx, "sandtable", {UI_MARGIN, UI_MARGIN, UI_LEFT_W, 200}, opts) {
 		panel_level(ui, ps, e)
 		panel_object(ctx, e)
 		panel_terrain(ctx, ps, e)
 		mu.end_window(ctx)
 	}
-	right := i32(e.win.x) - UI_RIGHT_W - 10
-	if mu.begin_window(ctx, "View", {max(right, UI_LEFT_W + 20), 10, UI_RIGHT_W, 400}, opts) {
+	right := i32(e.win.x) - UI_RIGHT_W - UI_MARGIN
+	fit_window(ctx, "View", UI_RIGHT_W, e.win.y)
+	if mu.begin_window(ctx, "View", {max(right, UI_LEFT_W + 2 * UI_MARGIN), UI_MARGIN, UI_RIGHT_W, 200}, opts) {
 		panel_look(ui, e)
 		if e.game_cam do panel_pixel(ui, e)
 		panel_keys(ctx)
 		mu.end_window(ctx)
 	}
+}
+
+// A window's size before microui lays it out: a fixed width, and as tall as
+// what it held last frame, but not past the bottom of the screen (it scrolls
+// then). microui's AUTO_SIZE does this from the content's width too, which
+// drifts a few pixels a frame with rows that fill the width: the windows
+// shrank and flickered.
+fit_window :: proc(ctx: ^mu.Context, title: string, w: i32, win_h: f32) {
+	cnt := mu.get_container(ctx, title)
+	if cnt == nil || cnt.rect.w == 0 do return // first frame: begin_window takes its rect
+	chrome := ctx.style.title_height + 2 * ctx.style.padding
+	room := i32(win_h) - cnt.rect.y - UI_MARGIN
+	cnt.rect.w = w
+	cnt.rect.h = clamp(cnt.content_size.y + chrome, chrome, max(room, chrome))
 }
 
 // The level's message line (level_say), bottom left, for a few seconds.
@@ -200,11 +217,12 @@ panel_object :: proc(ctx: ^mu.Context, e: Ui_Env) {
 		long_px := max(sz.x, sz.z) * p.world_scale * density
 		value_row(ctx, "on screen", fmt.tprintf("~%.0f art px long", long_px))
 	}
-	f := world_fmt(p.world_scale)
-	value_row(ctx, "position", fmt.tprintf("%s %s %s", fmt.tprintf(f, t.position.x), fmt.tprintf(f, t.position.y), fmt.tprintf(f, t.position.z)))
+	// position in metres from the world origin: shorter than world units
+	m := t.position / max(p.world_scale, 1e-12)
+	value_row(ctx, "position", fmt.tprintf("%.2f, %.2f, %.2f m", m.x, m.y, m.z))
 	tilt := math.acos(clamp(act.transform.up.y, -1, 1)) * math.DEG_PER_RAD if act.align else 0
-	value_row(ctx, "snap", fmt.tprintf("%v, align %s (%.1f°), offset %+.2f m", act.snap, "on" if act.align else "off", tilt,
-		act.offset / max(p.world_scale, 1e-12)))
+	value_row(ctx, "snap", fmt.tprintf("%v, offset %+.2f m", act.snap, act.offset / max(p.world_scale, 1e-12)))
+	value_row(ctx, "align", fmt.tprintf("on, tilt %.1f°", tilt) if act.align else "off")
 	if !act.on_terrain && act.snap != .Plane do value_row(ctx, "", "off the terrain: edge extended")
 }
 
@@ -219,9 +237,9 @@ panel_terrain :: proc(ctx: ^mu.Context, ps: ^Panels, e: Ui_Env) {
 	t := wt.t
 	s := t.stats
 	n := t.w * t.h
-	value_row(ctx, "grid", fmt.tprintf("%d × %d @ %.2f m, %.0f ms", t.w, t.h, t.cell / wt.built_scale, wt.build_ms))
-	value_row(ctx, "cells", fmt.tprintf("ground %.0f%%, structure %.0f%%, empty %.0f%%",
-		pct(s.ground_cells, n), pct(s.structure_cells, n), pct(n - s.data_cells, n)))
+	value_row(ctx, "grid", fmt.tprintf("%d × %d @ %.2f m", t.w, t.h, t.cell / wt.built_scale))
+	value_row(ctx, "cells", fmt.tprintf("ground %.0f%%, struct. %.0f%%", pct(s.ground_cells, n), pct(s.structure_cells, n)))
+	value_row(ctx, "", fmt.tprintf("empty %.0f%%, built in %.0f ms", pct(n - s.data_cells, n), wt.build_ms))
 	if abs(e.p.world_scale / max(wt.built_scale, 1e-12) - 1) > 0.01 {
 		mu.layout_row(ctx, {-1})
 		coloured(ctx, "world scale changed: rebuild", COL_WARN)
@@ -247,8 +265,9 @@ panel_terrain :: proc(ctx: ^mu.Context, ps: ^Panels, e: Ui_Env) {
 	ms := wm.stats
 	sec := level_map_section(e.lv)
 	value_row(ctx, "map", fmt.tprintf("%d × %d @ %.1f m", ms.w, ms.h, wm.m.cell))
-	value_row(ctx, "yaw", fmt.tprintf("%.1f°%s", ms.yaw, "" if sec.yaw != nil else " measured (export keeps it)"))
-	value_row(ctx, "features", fmt.tprintf("%d buildings, %d trees, %d walls, %d props", ms.buildings, ms.trees, ms.walls, ms.props))
+	value_row(ctx, "yaw", fmt.tprintf("%.1f°%s", ms.yaw, "" if sec.yaw != nil else ", measured"))
+	value_row(ctx, "features", fmt.tprintf("%d buildings, %d trees", ms.buildings, ms.trees))
+	value_row(ctx, "", fmt.tprintf("%d walls, %d props", ms.walls, ms.props))
 	value_row(ctx, "edits", fmt.tprintf("%d", wm.edits))
 	if wm.problems > 0 {
 		mu.layout_row(ctx, {-1})
@@ -265,9 +284,9 @@ panel_terrain :: proc(ctx: ^mu.Context, ps: ^Panels, e: Ui_Env) {
 panel_look :: proc(ui: ^Ui, e: Ui_Env) {
 	ctx := ui.ctx
 	if .ACTIVE not_in mu.header(ctx, "Look", {.EXPANDED}) do return
-	mu.layout_row(ctx, {-1})
-	value_row(ctx, "", e.title)
-	value_row(ctx, "drawing", fmt.tprintf("%d splats, %d × %d art, %d fps", e.splats, e.grid.w, e.grid.h, rl.GetFPS()))
+	value_row(ctx, "capture", short_path(e.title))
+	value_row(ctx, "splats", fmt.tprintf("%.2f M, %d fps", f32(e.splats) / 1e6, rl.GetFPS()))
+	value_row(ctx, "art", fmt.tprintf("%d × %d, ss %d", e.grid.w, e.grid.h, e.cfg.ss))
 
 	half := (UI_RIGHT_W - 2 * ctx.style.padding - ctx.style.spacing - 12) / 2
 	mu.layout_row(ctx, {half, -1})
@@ -299,13 +318,12 @@ panel_pixel :: proc(ui: ^Ui, e: Ui_Env) {
 	px := e.px
 	h := e.win.y
 	ws := max(e.world_scale, 1e-9)
-	mu.layout_row(ctx, {-1})
-	value_row(ctx, "now", fmt.tprintf("%.2f px per art pixel, %.0f m in view", e.grid.scale, e.view_height / ws))
-	value_row(ctx, "zoomed out", fmt.tprintf("%.0f m at %.1f px", px.out.view, h / px.out.rows))
-	value_row(ctx, "zoomed in", fmt.tprintf("%.0f m at %.1f px", px.in_.view, h / px.in_.rows))
+	value_row(ctx, "now", fmt.tprintf("%.0f m, %.2f px", e.view_height / ws, e.grid.scale))
+	value_row(ctx, "zoomed out", fmt.tprintf("%.0f m, %.1f px", px.out.view, h / px.out.rows))
+	value_row(ctx, "zoomed in", fmt.tprintf("%.0f m, %.1f px", px.in_.view, h / px.in_.rows))
 	if e.lv.pixel == nil {
 		mu.layout_row(ctx, {-1})
-		coloured(ctx, "defaults: store an end to keep it", COL_DIM)
+		coloured(ctx, "default ends: store one to keep it", COL_DIM)
 	}
 
 	half := (UI_RIGHT_W - 2 * ctx.style.padding - ctx.style.spacing - 12) / 2
@@ -330,7 +348,7 @@ KEYS_HELP := [?][2]string{
 	{"F1", "hide the panels"},
 	{"C", "game / free camera"},
 	{"drag, arrows", "turn (game camera)"},
-	{"shift+drag, right", "pan"},
+	{"shift+drag", "pan (or right drag)"},
 	{"scroll", "zoom"},
 	{"R", "reset the view"},
 	{"Tab, shift+Z", "terrain view, rebuild"},
@@ -347,12 +365,12 @@ KEYS_HELP := [?][2]string{
 	{"Z, U", "snap, align to slope"},
 	{"T, O", "reset, next model"},
 	{"B, V, F", "overlay, hide, print flags"},
-	{"ctrl+Z, ctrl+shift+Z", "undo, redo"},
+	{"ctrl+Z, +shift", "undo, redo"},
 }
 
 panel_keys :: proc(ctx: ^mu.Context) {
 	if .ACTIVE not_in mu.header(ctx, "Keys") do return
-	for k in KEYS_HELP do value_row(ctx, k[0], k[1], key_width = 150)
+	for k in KEYS_HELP do value_row(ctx, k[0], k[1], key_width = 140)
 }
 
 // ---------------------------------------------------------------------------
