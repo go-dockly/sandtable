@@ -59,7 +59,6 @@ Use `-o:speed` for big captures: sorting millions of splats is slow in a debug b
 | `--max-tilt deg` | steepest tilt, default 20 |
 | `--cell m` | terrain cell in metres; default 0.5, coarser for sparse clouds |
 | `--terrain-export prefix` | write the heightmaps after each terrain build (see *Terrain*) |
-| `--pixel-m m` | metres per art pixel in the game camera: sets the level's `pixel` section (ctrl+S keeps it); without one, framing the capture gives 4 screen pixels per art pixel in a 720-row window |
 
 With a level, a capture given as well wins over the level's, and `--model` is what `A` places in an empty level. `F` prints the selected object as these flags (`shift+F`: every object).
 
@@ -121,17 +120,17 @@ Look:
 |-----|------|
 | `C` | game camera (isometric, orthographic) / free orbit camera |
 | `Q` `X` `E` `S` `D` | palette quantise, hard splats, outline, supersample 1x/2x, dither 0 / 0.5 / 1 |
-| scroll | game camera zoom: smooth, at a fixed art pixel size in metres, so zooming out gets finer on screen and zooming in chunkier, within the level's band (default 3 to 6 screen pixels per art pixel) |
-| `alt`+scroll | zoom past the band, to see where it stops looking right |
-| `-` `=` | art pixel a size coarser / finer (the level's `pixel.metres`) |
-| `9` `0` | the band's zoom-out / zoom-in end at the current zoom |
+| scroll | game camera zoom: smooth, between the level's zoom-out and zoom-in ends, the art pixel size running linearly from one end's to the other's |
+| `8` | pixel tuning on / off: the zoom goes past the ends and the pixel size holds |
+| `-` `=` | (tuning) art pixels smaller / bigger on screen |
+| `9` `0` | store the zoom-out / zoom-in end: this view and this pixel size |
 | `P` | palette: extracted from the cloud / fixed Commandos colour script |
 | `G` | Commandos colour grade 1 / 0.5 / 0 (Commandos palette only) |
 
-The game camera's look is the level's `pixel` section: how many metres of the world one art pixel covers (the art's detail, the same at every zoom) and the band of zoom, in screen pixels per art pixel. Tune it by eye: `-` `=` for the detail, `alt`+scroll past the band, `9` and `0` to set its ends where it still looks right, then ctrl+S. The mission export copies it for the game's camera.
+The game camera's look is the level's `pixel` section: two ends of the zoom, each how many metres fill the window vertically (`view`) and with how many art pixels top to bottom (`rows`). The zoom stops at them; in between the art pixel's size on screen runs linearly from one end's to the other's. Rows rather than screen pixels, so a bigger window looks the same, only sharper. Tune it by eye: `8`, zoom out to where it should stop, `-` `=` until the pixels look right, `9`; zoom in, the same, `0`; `8` again to try it, then ctrl+S. Without a section the ends are 1.5x and a quarter of the framed view, at 240 and 120 rows. The mission export copies it for the game's camera.
 
 ```json
-  "pixel": { "metres": 0.1, "scaleMin": 3, "scaleMax": 6 },
+  "pixel": { "out": { "view": 120, "rows": 240 }, "in": { "view": 20, "rows": 120 } },
 ```
 | `[` `]` | hard mode: drop splats below this opacity |
 | `R` | reframe |
@@ -353,7 +352,7 @@ The parts that can be tested without a window are packages without raylib; the r
 odin test terrain     # 10: a synthetic street with a slope, a building with no ground under it, a tree, a car, haze, sky blobs, at Krakow's scale too; export and load_export round trip
 odin test editor      # 16: rays through both cameras, picking, cursor on street and roof, modes, ids, undo / redo, settling
 odin test artgrid     # 5: snapped render + shifted picture land every point where the true view does, the picture covers the window, the grid stays on the world, zoom resizes in buckets
-odin test scene -collection:cmd=../commandos    # 18: level round trip, repairs, paths, the map section, the pixel section, the export's buildings, footprints and merge
+odin test scene -collection:cmd=../commandos    # 19: level round trip, repairs, paths, the map section, the pixel section and its interpolation, the export's buildings, footprints and merge
 odin test mapgen -collection:cmd=../commandos   # 9: a turned synthetic town at Krakow's scale: alignment, buildings, a courtyard, a tree, walls high and low, edits, ids, at 1 and 0.5 m
 (cd ../commandos && odin test gamemap)         # 14: movement, ledges, ladders and roofs, links and abilities, sight by stance, cones, edits, files, speed
 odin run tools/commandos_check -collection:cmd=../commandos -collection:st=.   # 27 checks in the game's own code

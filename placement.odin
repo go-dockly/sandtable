@@ -112,7 +112,6 @@ Options :: struct {
 	level_arg:   bool,   // the level was the positional argument: it must exist
 	bench:       f32,    // seconds of the speed test (bench.odin); 0 none
 	bench_out:   string, // where its stats go
-	pixel_m:     f32,    // metres per art pixel in the game camera: sets the level's pixel section; 0: as the level has it
 }
 
 DEFAULT_MAX_TILT :: f32(20) // degrees; steeper than any street, flatter than a kerb edge
@@ -235,14 +234,6 @@ parse_options :: proc(args: []string) -> (o: Options, ok: bool) {
 				ok = false
 			} else {
 				o.bench = v
-			}
-		case "--pixel-m":
-			v, vok := strconv.parse_f32(value)
-			if !vok || v <= 0 {
-				fmt.eprintf("--pixel-m %q: expected metres per art pixel\n", value)
-				ok = false
-			} else {
-				o.pixel_m = v
 			}
 		case "--bench-out":
 			o.bench_out = value

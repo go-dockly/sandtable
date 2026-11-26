@@ -4,8 +4,8 @@ package main
 //
 // The game camera keeps a fixed number of art pixels per world unit
 // (artgrid/): the wheel zooms smoothly and an art pixel covers a fraction of
-// screen pixels, within the level's band (its "pixel" section, scene/pixel.odin;
-// tuned with the keys in pixel_keys). The art is drawn with UPSCALE_FS so every
+// screen pixels, its size running between the level's two ends (its "pixel"
+// section, scene/pixel.odin; tuned with the keys in pixel_keys). The art is drawn with UPSCALE_FS so every
 // art pixel is the same size on screen at any fraction. The free camera keeps
 // whole PIXEL_SIZE_FREE pixels.
 
@@ -14,45 +14,61 @@ import rl "vendor:raylib"
 import "scene"
 
 PIXEL_SIZE_FREE :: 4 // screen pixels per art pixel, free camera
-// Without a "pixel" section, framing a capture shows it at 4 screen pixels
-// per art pixel in a window FRAMED_ROWS * 4 tall (720), in the default band.
-FRAMED_ROWS     :: f32(180)
-PIXEL_STEP      :: f32(1.1) // - / = change the art pixel's size by this factor
+
+// Without a pixel section: zoomed out to 1.5x the framed view at 240 rows,
+// in to a quarter of it at 120 (3 and 6 screen pixels per art pixel in a
+// 720-row window).
+DEFAULT_OUT :: scene.Pixel_End{view = 1.5, rows = 240}
+DEFAULT_IN  :: scene.Pixel_End{view = 0.25, rows = 120}
+PIXEL_STEP  :: f32(1.1) // - / = while tuning
+TUNE_REACH  :: f32(8)   // while tuning, the zoom goes this far past either end
 
 // The level's pixel section, or the one framing implies.
 level_pixel :: proc(lv: ^Level_State, iso: Iso, world_scale: f32) -> scene.Pixel {
 	if p, ok := lv.pixel.?; ok do return p
-	d := max(iso.px_per_unit * world_scale, 1e-9) // art pixels per metre
-	return scene.Pixel{metres = 1 / d, scale_min = scene.PIXEL_SCALE_DEFAULT[0], scale_max = scene.PIXEL_SCALE_DEFAULT[1]}
+	v := iso.framed_height / max(world_scale, 1e-9) // metres
+	return scene.Pixel{
+		out = {view = v * DEFAULT_OUT.view, rows = DEFAULT_OUT.rows},
+		in_ = {view = v * DEFAULT_IN.view, rows = DEFAULT_IN.rows},
+	}
 }
 
-// Tuning the look by eye, game camera:
-//   -  =     art pixels a size coarser / finer (the art's detail)
-//   alt+scroll  zoom past the band, to find where it stops looking right
-//   9        the zoom-out end of the band here (the finest on screen)
-//   0        the zoom-in end here (the chunkiest)
-// Each writes the level's pixel section; ctrl+S saves it. scale: the current
-// screen pixels per art pixel.
-pixel_keys :: proc(lv: ^Level_State, iso: Iso, world_scale, scale: f32) {
-	p := level_pixel(lv, iso, world_scale)
-	changed := true
-	switch {
-	case rl.IsKeyPressed(.MINUS) || rl.IsKeyPressed(.KP_SUBTRACT):
-		p.metres *= PIXEL_STEP
-	case rl.IsKeyPressed(.EQUAL) || rl.IsKeyPressed(.KP_ADD):
-		p.metres /= PIXEL_STEP
-	case rl.IsKeyPressed(.NINE):
-		p.scale_min = scale
-	case rl.IsKeyPressed(.ZERO):
-		p.scale_max = scale
-	case:
-		changed = false
+// Tuning: the zoom goes past the ends and the pixel size holds still, set by
+// hand, until it is stored as an end.
+Pixel_Tune :: struct {
+	on:    bool,
+	scale: f32, // screen pixels per art pixel
+}
+
+// Game camera:
+//   8      tuning on / off
+//   - =    (tuning) art pixels smaller / bigger on screen
+//   9      the zoom-out end: this view, this pixel size
+//   0      the zoom-in end: this view, this pixel size
+// 9 and 0 write the level's pixel section; ctrl+S saves it. scale: the
+// current screen pixels per art pixel.
+pixel_keys :: proc(lv: ^Level_State, tune: ^Pixel_Tune, iso: Iso, world_scale, win_h, scale: f32) {
+	if rl.IsKeyPressed(.EIGHT) {
+		tune.on = !tune.on
+		tune.scale = scale
+		level_say(lv, false, "pixel tuning %s", "on: zoom anywhere, -/= pixel size, 9 / 0 store an end" if tune.on else "off")
 	}
-	if !changed do return
-	if p.scale_min > p.scale_max do p.scale_min, p.scale_max = p.scale_max, p.scale_min
-	scene.fix_pixel(&p)
+	if tune.on {
+		if rl.IsKeyPressed(.MINUS) || rl.IsKeyPressed(.KP_SUBTRACT) do tune.scale /= PIXEL_STEP
+		if rl.IsKeyPressed(.EQUAL) || rl.IsKeyPressed(.KP_ADD) do tune.scale *= PIXEL_STEP
+		lim := scene.PIXEL_ROWS_LIMITS
+		tune.scale = clamp(tune.scale, win_h / lim[1], win_h / lim[0])
+	}
+	nine, zero := rl.IsKeyPressed(.NINE), rl.IsKeyPressed(.ZERO)
+	if !nine && !zero do return
+	p := level_pixel(lv, iso, world_scale)
+	end := scene.Pixel_End{view = iso.view_height / max(world_scale, 1e-9), rows = win_h / max(scale, 1e-6)}
+	if nine do p.out = end
+	else do p.in_ = end
+	if !scene.fix_pixel(&p) do return
 	lv.pixel = p
-	level_say(lv, false, "pixel %.1f cm, zoom %.2fx..%.2fx (ctrl+S saves)", p.metres * 100, p.scale_min, p.scale_max)
+	level_say(lv, false, "pixel: out %.0f m at %.1fx, in %.0f m at %.1fx (ctrl+S saves)",
+		p.out.view, win_h / p.out.rows, p.in_.view, win_h / p.in_.rows)
 }
 
 // Draws the art at a fractional scale with every art pixel the same size:

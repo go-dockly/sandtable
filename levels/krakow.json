@@ -8,17 +8,12 @@
   "terrainCell": 0,
   "maxTilt": 20,
   "nextId": 2,
-  "view": { "target": [-0.016732316, 0.08569336, -0.014106343], "azimuth": 167.99963, "viewHeight": 0.5184886 },
-  "game": { "mission": "krakow.mission.json", "base": "krakow.mission.base.json", "origin": [-0.3450879, -0.3968457], "size": [135, 151], "buildingsFromTerrain": true },
-  "map": {
-    "file": "krakow.map.json",
-    "cell": 1,
-    "edits": []
-  },
+  "view": { "target": [0.0030803655, 0.08569336, 0.12927444], "azimuth": -176.40004, "viewHeight": 0.55011934 },
+  "pixel": { "out": { "view": 110.02387, "rows": 501.26996 }, "in": { "view": 62.95728, "rows": 119.99999 } },
   "assets": [
     { "id": "volkswagen_82", "path": "../models/car/volkswagen_82.glb" }
   ],
   "objects": [
-    { "id": 1, "asset": "volkswagen_82", "position": [-0.001953125, 0.010156622, -0.03540039], "rotation": [0, 0, 0], "scale": [1, 1, 1], "up": [0.115791775, 0.9921227, 0.04779909], "snap": "ground", "offset": 0, "align": true, "ground": 0.010156622 }
+    { "id": 1, "asset": "volkswagen_82", "position": [0.08075464, 0.008089535, 0.045437098], "rotation": [0, 0, 0], "scale": [1, 1, 1], "up": [0.07134625, 0.9944799, 0.076937295], "snap": "ground", "offset": 0, "align": true, "ground": 0.008089535 }
   ]
 }

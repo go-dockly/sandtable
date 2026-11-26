@@ -88,7 +88,7 @@ main :: proc() {
 		fmt.eprintln(
 			"usage: sandtable <cloud.spz|.ply> [--model file.glb] [--world-scale u] [--pos x,y,z] [--yaw deg] [--scale s] [--ground y]\n" +
 			"                 [--snap ground|surface|plane] [--offset y] [--align] [--max-tilt deg] [--cell m] [--terrain-export prefix]\n" +
-			"                 [--level file.json] [--bench seconds] [--bench-out stats.json] [--pixel-m metres]\n" +
+			"                 [--level file.json] [--bench seconds] [--bench-out stats.json]\n" +
 			"       sandtable <level.json> [--model file.glb]",
 		)
 		return
@@ -164,6 +164,7 @@ main :: proc() {
 
 	// pixlsplat's defaults: quant + outline + crisp on, 2x supersampling, no dither
 	cfg := Post_Settings{quant = true, crisp = true, outline = true, ss = 2, dither = 0}
+	tune: Pixel_Tune
 	upscale: Upscale
 	upscale_init(&upscale)
 	defer upscale_destroy(&upscale)
@@ -331,19 +332,19 @@ main :: proc() {
 		win := [2]f32{f32(rl.GetScreenWidth()), f32(rl.GetScreenHeight())}
 		ws := placement.world_scale if placement.world_scale > 0 else 1
 		px := level_pixel(&lv, iso, ws)
-		density := 1 / (px.metres * ws) // art pixels per world unit
 		camera: rl.Camera3D
 		grid: artgrid.Grid
 		if game_cam {
-			// the zoom: an art pixel the level's band of screen pixels; alt
-			// goes past it, for finding a new one
-			band := [2]f32{px.scale_min, px.scale_max}
-			alt := rl.IsKeyDown(.LEFT_ALT) || rl.IsKeyDown(.RIGHT_ALT)
-			if alt do band = scene.PIXEL_SCALE_LIMITS
-			iso.min_height, iso.max_height = artgrid.view_range(win.y, density, band[0], band[1])
+			// the zoom stops at the level's two ends; tuning goes past them
+			lo, hi := px.in_.view * ws, px.out.view * ws
+			if tune.on do lo, hi = lo / TUNE_REACH, hi * TUNE_REACH
+			iso.min_height, iso.max_height = lo, hi
 			// the bench drives the camera itself: input would skew its phases
 			if !bench.ok do iso_update(&iso, win.y, left_drag)
-			if !alt do iso.view_height = clamp(iso.view_height, iso.min_height, iso.max_height)
+			iso.view_height = clamp(iso.view_height, lo, hi)
+			// art rows across the window: between the ends, or held while tuning
+			rows := win.y / tune.scale if tune.on else scene.pixel_rows(px, iso.view_height / ws)
+			density := rows / iso.view_height // art pixels per world unit
 			camera = iso_camera(iso)
 			fwd := linalg.normalize(camera.target - camera.position)
 			right := linalg.normalize(linalg.cross(fwd, [3]f32{0, 1, 0}))
@@ -354,7 +355,7 @@ main :: proc() {
 			camera.target += shift
 			camera.position += shift
 			camera.fovy = f32(grid.h) / density
-			if !bench.ok && !cmd do pixel_keys(&lv, iso, ws, grid.scale)
+			if !bench.ok && !cmd do pixel_keys(&lv, &tune, iso, ws, win.y, grid.scale)
 		} else {
 			update_orbit(&free_cam, left_drag)
 			camera = free_cam
@@ -391,14 +392,6 @@ main :: proc() {
 			delete(lv.saved)
 			lv.saved = strings.clone(level_text(&lv, &placement, cloud_path, ground_proxy.cell_m, nil))
 			lv.baseline = false
-		}
-		// --pixel-m: a change to the level's pixel section, once it is loaded,
-		// so the level shows unsaved until ctrl+S
-		if opts.pixel_m > 0 && !lv.baseline {
-			p := level_pixel(&lv, iso, placement.world_scale if placement.world_scale > 0 else 1)
-			p.metres = opts.pixel_m
-			lv.pixel = p
-			opts.pixel_m = 0
 		}
 		dirty := level_dirty(&lv, &placement, cloud_path, ground_proxy.cell_m)
 
@@ -481,14 +474,16 @@ main :: proc() {
 		} else {
 			rl.DrawText(
 				fmt.ctprintf(
-					"%d splats | %s camera | pixel %.2fx of %.1f..%.1f, %.1f cm%s (%dx%d art, ss %d) | %d fps",
+					"%d splats | %s camera | pixel %.2fx%s, out %.0f m %.1fx, in %.0f m %.1fx%s (%dx%d art, ss %d) | %d fps",
 					view.count,
 					"game" if game_cam else "free",
 					grid.scale,
-					px.scale_min,
-					px.scale_max,
-					px.metres * 100,
-					"" if lv.pixel != nil else " default",
+					" TUNING" if tune.on else "",
+					px.out.view,
+					win.y / px.out.rows,
+					px.in_.view,
+					win.y / px.in_.rows,
+					"" if lv.pixel != nil else " (default)",
 					targets.w,
 					targets.h,
 					cfg.ss,
@@ -511,7 +506,7 @@ main :: proc() {
 			10, 58, 16, {180, 180, 180, 255},
 		)
 		rl.DrawText(
-			"[C] camera  [S] ss  [R] reset | game: drag/arrows rotate, shift/right-drag pan, scroll zoom (alt: past the band), [-/=] art pixel size, [9]/[0] band ends here | free: drag orbit",
+			"[C] camera  [S] ss  [R] reset | game: drag/arrows rotate, shift/right-drag pan, scroll zoom, [8] tune pixels: [-/=] size, [9]/[0] store zoom-out / zoom-in end | free: drag orbit",
 			10, 78, 16, {160, 160, 160, 255},
 		)
 		px_per_unit := f32(targets.h) / camera.fovy if game_cam else 0

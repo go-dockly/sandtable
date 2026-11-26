@@ -31,9 +31,9 @@ Iso :: struct {
 	azimuth:     f32, // degrees
 	elevation:   f32, // degrees
 	view_height: f32, // world units the window shows vertically: the zoom
-	min_height:  f32, // set every frame from the art density (artgrid.view_range)
+	min_height:  f32, // set every frame: the level's zoom-in end
 	max_height:  f32,
-	px_per_unit: f32, // art pixels per world unit, chosen when framing
+	framed_height: f32, // view_height when framed: the default pixel section's scale
 	distance:    f32, // camera to target; only sets where the near/far planes sit
 	dragging:    bool,
 	prev_mouse:  rl.Vector2,
@@ -48,8 +48,7 @@ iso_frame :: proc(c: ^Iso, center: [3]f32, extent: f32) {
 	c.view_height = e * 1.7
 	c.min_height = e * 0.15
 	c.max_height = e * 4
-	// so the framed view is 4 screen pixels per art pixel at 720 rows
-	c.px_per_unit = FRAMED_ROWS / c.view_height
+	c.framed_height = c.view_height
 	c.distance = e * 6
 }
 
